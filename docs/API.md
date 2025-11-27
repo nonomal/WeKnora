@@ -44,9 +44,7 @@ X-Request-ID: unique_request_id
 
 ### 获取 API Key
 
-获取 API Key 有以下方式：
-
-**创建租户时获取**：通过 `POST /api/v1/tenants` 接口创建新租户时，响应中会自动返回生成的 API Key。
+在 web 页面完成账户注册后，请前往账户信息页面获取您的 API Key。
 
 请妥善保管您的 API Key，避免泄露。API Key 代表您的账户身份，拥有完整的 API 访问权限。
 
@@ -336,7 +334,6 @@ curl --location 'http://localhost:8080/api/v1/tenants' \
 | GET    | `/knowledge-bases/:id`               | 获取知识库详情           |
 | PUT    | `/knowledge-bases/:id`               | 更新知识库               |
 | DELETE | `/knowledge-bases/:id`               | 删除知识库               |
-| GET    | `/knowledge-bases/:id/hybrid-search` | 混合搜索知识库内容       |
 | POST   | `/knowledge-bases/copy`              | 拷贝知识库               |
 
 #### POST `/knowledge-bases` - 创建知识库
@@ -654,51 +651,6 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/b
 ```json
 {
     "message": "Knowledge base deleted successfully",
-    "success": true
-}
-```
-
-#### GET `/knowledge-bases/:id/hybrid-search` - 混合搜索知识库内容
-
-**请求**:
-
-```curl
-curl --location --request GET 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/hybrid-search' \
---header 'Content-Type: application/json' \
---header 'X-API-Key: sk-vQHV2NZI_LK5W7wHQvH3yGYExX8YnhaHwZipUYbiZKCYJbBQ' \
---data '{
-    "query_text": "彗星",
-    "vector_threshold": 0.1,
-    "keyword_threshold": 0.1,
-    "match_count": 1
-}'
-```
-
-**响应**:
-
-```json
-{
-    "data": [
-        {
-            "id": "7d955251-3f79-4fd5-a6aa-02f81e044091",
-            "content": "有几位后来xxxxx",
-            "knowledge_id": "a6790b93-4700-4676-bd48-0d4804e1456b",
-            "chunk_index": 3,
-            "knowledge_title": "彗星.txt",
-            "start_at": 2287,
-            "end_at": 2760,
-            "seq": 3,
-            "score": 0.7402352891601821,
-            "match_type": 2,
-            "sub_chunk_id": null,
-            "metadata": {},
-            "chunk_type": "text",
-            "parent_chunk_id": "",
-            "image_info": "",
-            "knowledge_filename": "彗星.txt",
-            "knowledge_source": ""
-        }
-    ],
     "success": true
 }
 ```

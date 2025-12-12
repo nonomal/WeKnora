@@ -3,9 +3,11 @@
         <Menu></Menu>
         <RouterView />
         <div class="upload-mask" v-show="ismask">
-            <input type="file" style="display: none" ref="uploadInput" accept=".pdf,.docx,.doc,.txt,.md" />
+            <input type="file" style="display: none" ref="uploadInput" accept=".pdf,.docx,.doc,.txt,.md,.jpg,.jpeg,.png,.csv,.xls,.xlsx" />
             <UploadMask></UploadMask>
         </div>
+        <!-- 全局设置模态框，供所有 platform 子路由使用 -->
+        <Settings />
     </div>
 </template>
 <script setup lang="ts">
@@ -14,13 +16,16 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router'
 import useKnowledgeBase from '@/hooks/useKnowledgeBase'
 import UploadMask from '@/components/upload-mask.vue'
+import Settings from '@/views/settings/Settings.vue'
 import { getKnowledgeBaseById } from '@/api/knowledge-base/index'
 import { MessagePlugin } from 'tdesign-vue-next'
+import { useI18n } from 'vue-i18n'
 
 let { requestMethod } = useKnowledgeBase()
 const route = useRoute();
 let ismask = ref(false)
 let uploadInput = ref();
+const { t } = useI18n();
 
 // 获取当前知识库ID
 const getCurrentKbId = (): string | null => {
@@ -32,7 +37,7 @@ const checkKnowledgeBaseInitialization = async (): Promise<boolean> => {
     const currentKbId = getCurrentKbId();
     
     if (!currentKbId) {
-        MessagePlugin.error("缺少知识库ID");
+        MessagePlugin.error(t('knowledgeBase.missingId'));
         return false;
     }
     
@@ -41,12 +46,12 @@ const checkKnowledgeBaseInitialization = async (): Promise<boolean> => {
         const kb = kbResponse.data;
         
         if (!kb.embedding_model_id || !kb.summary_model_id) {
-            MessagePlugin.warning("该知识库尚未完成初始化配置，请先前往设置页面配置模型信息后再上传文件");
+            MessagePlugin.warning(t('knowledgeBase.notInitialized'));
             return false;
         }
         return true;
     } catch (error) {
-        MessagePlugin.error("获取知识库信息失败，无法上传文件");
+        MessagePlugin.error(t('knowledgeBase.getInfoFailed'));
         return false;
     }
 }
@@ -91,7 +96,7 @@ const handleGlobalDrop = async (event: DragEvent) => {
             }
         });
     } else {
-        MessagePlugin.warning('请拖拽文件而不是文本或链接');
+        MessagePlugin.warning(t('knowledgeBase.dragFileNotText'));
     }
 }
 

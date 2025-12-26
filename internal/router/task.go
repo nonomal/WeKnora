@@ -14,8 +14,11 @@ import (
 type AsynqTaskParams struct {
 	dig.In
 
-	Server    *asynq.Server
-	Extracter interfaces.Extracter
+	Server               *asynq.Server
+	Extracter            interfaces.Extracter
+	KnowledgeService     interfaces.KnowledgeService
+	KnowledgeBaseService interfaces.KnowledgeBaseService
+	TagService           interfaces.KnowledgeTagService
 }
 
 func getAsynqRedisClientOpt() *asynq.RedisClientOpt {
@@ -29,10 +32,14 @@ func getAsynqRedisClientOpt() *asynq.RedisClientOpt {
 	return opt
 }
 
-func NewAsyncqClient() *asynq.Client {
+func NewAsyncqClient() (*asynq.Client, error) {
 	opt := getAsynqRedisClientOpt()
 	client := asynq.NewClient(opt)
-	return client
+	err := client.Ping()
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 func NewAsynqServer() *asynq.Server {
@@ -55,6 +62,27 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 	mux := asynq.NewServeMux()
 
 	mux.HandleFunc(types.TypeChunkExtract, params.Extracter.Extract)
+
+	// Register document processing handler
+	mux.HandleFunc(types.TypeDocumentProcess, params.KnowledgeService.ProcessDocument)
+
+	// Register FAQ import handler
+	mux.HandleFunc(types.TypeFAQImport, params.KnowledgeService.ProcessFAQImport)
+
+	// Register question generation handler
+	mux.HandleFunc(types.TypeQuestionGeneration, params.KnowledgeService.ProcessQuestionGeneration)
+
+	// Register summary generation handler
+	mux.HandleFunc(types.TypeSummaryGeneration, params.KnowledgeService.ProcessSummaryGeneration)
+
+	// Register KB clone handler
+	mux.HandleFunc(types.TypeKBClone, params.KnowledgeService.ProcessKBClone)
+
+	// Register index delete handler
+	mux.HandleFunc(types.TypeIndexDelete, params.TagService.ProcessIndexDelete)
+
+	// Register KB delete handler
+	mux.HandleFunc(types.TypeKBDelete, params.KnowledgeBaseService.ProcessKBDelete)
 
 	go func() {
 		// Start the server

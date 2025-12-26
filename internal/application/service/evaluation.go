@@ -109,7 +109,7 @@ func (e *EvaluationService) EvaluationResult(ctx context.Context, taskID string)
 		return nil, err
 	}
 
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint)
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	logger.Infof(
 		ctx,
 		"Checking tenant ID match, task tenant ID: %d, current tenant ID: %d",
@@ -138,7 +138,7 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 		datasetID, knowledgeBaseID, chatModelID, rerankModelID)
 
 	// Get tenant ID from context for multi-tenancy support
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint)
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	logger.Infof(ctx, "Tenant ID: %d", tenantID)
 
 	// Handle knowledge base creation if not provided
@@ -154,6 +154,9 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 
 		var embeddingModelID, llmModelID string
 		for _, model := range models {
+			if model == nil {
+				continue
+			}
 			if model.Type == types.ModelTypeEmbedding {
 				embeddingModelID = model.ID
 			}
@@ -212,6 +215,9 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 		models, err := e.modelService.ListModels(ctx)
 		if err == nil {
 			for _, model := range models {
+				if model == nil {
+					continue
+				}
 				if model.Type == types.ModelTypeRerank {
 					rerankModelID = model.ID
 					break
@@ -230,6 +236,9 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 		models, err := e.modelService.ListModels(ctx)
 		if err == nil {
 			for _, model := range models {
+				if model == nil {
+					continue
+				}
 				if model.Type == types.ModelTypeKnowledgeQA {
 					chatModelID = model.ID
 					break
@@ -257,10 +266,10 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 			StartTime: time.Now(),
 		},
 		Params: &types.ChatManage{
-			KnowledgeBaseID:  knowledgeBaseID,
 			VectorThreshold:  e.config.Conversation.VectorThreshold,
 			KeywordThreshold: e.config.Conversation.KeywordThreshold,
 			EmbeddingTopK:    e.config.Conversation.EmbeddingTopK,
+			MaxRounds:        e.config.Conversation.MaxRounds,
 			RerankModelID:    rerankModelID,
 			RerankTopK:       e.config.Conversation.RerankTopK,
 			RerankThreshold:  e.config.Conversation.RerankThreshold,
@@ -279,7 +288,9 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 				Seed:                e.config.Conversation.Summary.Seed,
 				MaxCompletionTokens: e.config.Conversation.Summary.MaxCompletionTokens,
 			},
-			FallbackResponse: e.config.Conversation.FallbackResponse,
+			FallbackResponse:    e.config.Conversation.FallbackResponse,
+			RewritePromptSystem: e.config.Conversation.RewritePromptSystem,
+			RewritePromptUser:   e.config.Conversation.RewritePromptUser,
 		},
 	}
 
@@ -299,7 +310,7 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 		logger.Info(newCtx, "Evaluation task status set to running")
 
 		// Execute actual evaluation
-		if err := e.EvalDataset(newCtx, detail); err != nil {
+		if err := e.EvalDataset(newCtx, detail, knowledgeBaseID); err != nil {
 			detail.Task.Status = types.EvaluationStatueFailed
 			detail.Task.ErrMsg = err.Error()
 			logger.Errorf(newCtx, "Evaluation task failed: %v, task ID: %s", err, taskID)
@@ -317,7 +328,7 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 
 // EvalDataset performs the actual evaluation of a dataset
 // Processes each QA pair in parallel and records metrics
-func (e *EvaluationService) EvalDataset(ctx context.Context, detail *types.EvaluationDetail) error {
+func (e *EvaluationService) EvalDataset(ctx context.Context, detail *types.EvaluationDetail, knowledgeBaseID string) error {
 	logger.Info(ctx, "Start evaluating dataset")
 	logger.Infof(ctx, "Task ID: %s, Dataset ID: %s", detail.Task.ID, detail.Task.DatasetID)
 
@@ -340,7 +351,7 @@ func (e *EvaluationService) EvalDataset(ctx context.Context, detail *types.Evalu
 	logger.Infof(ctx, "Creating knowledge from %d passages", len(passages))
 
 	// Create knowledge base from passages
-	knowledge, err := e.knowledgeService.CreateKnowledgeFromPassage(ctx, detail.Params.KnowledgeBaseID, passages)
+	knowledge, err := e.knowledgeService.CreateKnowledgeFromPassage(ctx, knowledgeBaseID, passages)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to create knowledge from passages: %v", err)
 		return err
@@ -354,12 +365,12 @@ func (e *EvaluationService) EvalDataset(ctx context.Context, detail *types.Evalu
 			logger.Errorf(ctx, "Failed to delete knowledge: %v, knowledge ID: %s", err, knowledge.ID)
 		}
 
-		logger.Infof(ctx, "Cleaning up resources - deleting knowledge base: %s", detail.Params.KnowledgeBaseID)
-		if err := e.knowledgeBaseService.DeleteKnowledgeBase(ctx, detail.Params.KnowledgeBaseID); err != nil {
+		logger.Infof(ctx, "Cleaning up resources - deleting knowledge base: %s", knowledgeBaseID)
+		if err := e.knowledgeBaseService.DeleteKnowledgeBase(ctx, knowledgeBaseID); err != nil {
 			logger.Errorf(
 				ctx,
 				"Failed to delete knowledge base: %v, knowledge base ID: %s",
-				err, detail.Params.KnowledgeBaseID,
+				err, knowledgeBaseID,
 			)
 		}
 	}()
@@ -384,6 +395,15 @@ func (e *EvaluationService) EvalDataset(ctx context.Context, detail *types.Evalu
 			// Prepare chat management parameters for this QA pair
 			chatManage := detail.Params.Clone()
 			chatManage.Query = qaPair.Question
+			chatManage.RewriteQuery = qaPair.Question
+			// Set knowledge base ID and search targets for this evaluation
+			chatManage.KnowledgeBaseIDs = []string{knowledgeBaseID}
+			chatManage.SearchTargets = types.SearchTargets{
+				&types.SearchTarget{
+					Type:            types.SearchTargetTypeKnowledgeBase,
+					KnowledgeBaseID: knowledgeBaseID,
+				},
+			}
 
 			// Execute knowledge QA pipeline
 			logger.Infof(ctx, "Running knowledge QA for question: %s", qaPair.Question)

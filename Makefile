@@ -1,4 +1,4 @@
-.PHONY: help build run test clean docker-build-app docker-build-docreader docker-build-frontend docker-build-all docker-run migrate-up migrate-down docker-restart docker-stop start-all stop-all start-ollama stop-ollama build-images build-images-app build-images-docreader build-images-frontend clean-images check-env list-containers pull-images show-platform
+.PHONY: help build run test clean docker-build-app docker-build-docreader docker-build-frontend docker-build-all docker-run migrate-up migrate-down docker-restart docker-stop start-all stop-all start-ollama stop-ollama build-images build-images-app build-images-docreader build-images-frontend clean-images check-env list-containers pull-images show-platform dev-start dev-stop dev-restart dev-logs dev-status dev-app dev-frontend docs install-swagger
 
 # Show help
 help:
@@ -39,13 +39,23 @@ help:
 	@echo "  fmt               格式化代码"
 	@echo "  lint              代码检查"
 	@echo "  deps              安装依赖"
-	@echo "  docs              生成 API 文档"
+	@echo "  docs              生成 Swagger API 文档"
+	@echo "  install-swagger   安装 swag 工具"
 	@echo ""
 	@echo "环境检查:"
 	@echo "  check-env         检查环境配置"
 	@echo "  list-containers   列出运行中的容器"
 	@echo "  pull-images       拉取最新镜像"
 	@echo "  show-platform     显示当前构建平台"
+	@echo ""
+	@echo "开发模式（推荐）:"
+	@echo "  dev-start         启动开发环境基础设施（仅启动依赖服务）"
+	@echo "  dev-stop          停止开发环境"
+	@echo "  dev-restart       重启开发环境"
+	@echo "  dev-logs          查看开发环境日志"
+	@echo "  dev-status        查看开发环境状态"
+	@echo "  dev-app           启动后端应用（本地运行，需先运行 dev-start）"
+	@echo "  dev-frontend      启动前端（本地运行，需先运行 dev-start）"
 
 # Go related variables
 BINARY_NAME=WeKnora
@@ -158,9 +168,43 @@ migrate-up:
 migrate-down:
 	./scripts/migrate.sh down
 
-# Generate API documentation
+migrate-version:
+	./scripts/migrate.sh version
+
+migrate-create:
+	@if [ -z "$(name)" ]; then \
+		echo "Error: migration name is required"; \
+		echo "Usage: make migrate-create name=your_migration_name"; \
+		exit 1; \
+	fi
+	./scripts/migrate.sh create $(name)
+
+migrate-force:
+	@if [ -z "$(version)" ]; then \
+		echo "Error: version is required"; \
+		echo "Usage: make migrate-force version=4"; \
+		exit 1; \
+	fi
+	./scripts/migrate.sh force $(version)
+
+migrate-goto:
+	@if [ -z "$(version)" ]; then \
+		echo "Error: version is required"; \
+		echo "Usage: make migrate-goto version=3"; \
+		exit 1; \
+	fi
+	./scripts/migrate.sh goto $(version)
+
+# Generate API documentation (Swagger)
 docs:
-	swag init -g $(MAIN_PATH)/main.go -o ./docs
+	@echo "生成 Swagger API 文档..."
+	swag init -g $(MAIN_PATH)/main.go -o ./docs --parseDependency --parseInternal
+	@echo "文档已生成到 ./docs 目录"
+	@echo "启动服务后访问 http://localhost:8080/swagger/index.html 查看文档"
+
+# Install swagger tool
+install-swagger:
+	go install github.com/swaggo/swag/cmd/swag@latest
 
 # Format code
 fmt:
@@ -211,5 +255,27 @@ pull-images:
 show-platform:
 	@echo "当前系统架构: $(shell uname -m)"
 	@echo "Docker构建平台: $(PLATFORM)"
+
+# Development mode commands
+dev-start:
+	./scripts/dev.sh start
+
+dev-stop:
+	./scripts/dev.sh stop
+
+dev-restart:
+	./scripts/dev.sh restart
+
+dev-logs:
+	./scripts/dev.sh logs
+
+dev-status:
+	./scripts/dev.sh status
+
+dev-app:
+	./scripts/dev.sh app
+
+dev-frontend:
+	./scripts/dev.sh frontend
 
 

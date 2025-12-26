@@ -7,6 +7,7 @@ WORKDIR /app
 ARG GOPRIVATE_ARG
 ARG GOPROXY_ARG
 ARG GOSUMDB_ARG=off
+ARG APK_MIRROR_ARG="mirrors.tencent.com"
 
 # 设置Go环境变量
 ENV GOPRIVATE=${GOPRIVATE_ARG}
@@ -14,7 +15,9 @@ ENV GOPROXY=${GOPROXY_ARG}
 ENV GOSUMDB=${GOSUMDB_ARG}
 
 # Install dependencies
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apk/repositories && \
+RUN if [ -n "$APK_MIRROR_ARG" ]; then \
+        sed -i "s@dl-cdn.alpinelinux.org@${APK_MIRROR_ARG}@g" /etc/apk/repositories; \
+    fi && \
     apk add --no-cache git build-base
 
 # Install migrate tool
@@ -42,18 +45,31 @@ RUN --mount=type=cache,target=/go/pkg/mod make build-prod
 RUN --mount=type=cache,target=/go/pkg/mod cp -r /go/pkg/mod/github.com/yanyiwu/ /app/yanyiwu/
 
 # Final stage
-FROM alpine:3.17
+FROM alpine:3.23
 
 WORKDIR /app
 
-# Install runtime dependencies
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apk/repositories && \
-    apk update && apk upgrade && \
-    apk add --no-cache build-base postgresql-client mysql-client ca-certificates tzdata sed curl bash vim wget
+ARG APK_MIRROR_ARG="mirrors.tencent.com"
 
-# Create a non-root user and switch to it
+# Create a non-root user first
+RUN id -u appuser >/dev/null 2>&1 || adduser -D -g '' appuser
+
+RUN if [ -n "$APK_MIRROR_ARG" ]; then \
+        sed -i "s@dl-cdn.alpinelinux.org@${APK_MIRROR_ARG}@g" /etc/apk/repositories; \
+    fi && \
+    apk update && apk upgrade && \
+    apk add --no-cache build-base postgresql-client mysql-client ca-certificates tzdata sed curl bash vim wget \
+        python3 py3-pip python3-dev libffi-dev openssl-dev && \
+    python3 -m pip install --break-system-packages --upgrade pip setuptools wheel && \
+    apk add --no-cache nodejs-current npm && \
+    mkdir -p /home/appuser/.local/bin && \
+    curl -LsSf https://astral.sh/uv/install.sh | CARGO_HOME=/home/appuser/.cargo UV_INSTALL_DIR=/home/appuser/.local/bin sh && \
+    chown -R appuser:appuser /home/appuser && \
+    ln -sf /home/appuser/.local/bin/uvx /usr/local/bin/uvx && \
+    chmod +x /usr/local/bin/uvx
+
+# Create data directories and set permissions
 RUN mkdir -p /data/files && \
-    adduser -D -g '' appuser && \
     chown -R appuser:appuser /app /data/files
 
 # Copy migrate tool from builder stage

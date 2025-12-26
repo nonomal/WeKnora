@@ -8,6 +8,7 @@ import (
 	"context"
 
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/hibiken/asynq"
 )
 
 // KnowledgeBaseService defines the knowledge base service interface
@@ -80,6 +81,22 @@ type KnowledgeBaseService interface {
 	//   - Copied knowledge base object
 	//   - Possible errors such as not existing, insufficient permissions, etc.
 	CopyKnowledgeBase(ctx context.Context, src string, dst string) (*types.KnowledgeBase, *types.KnowledgeBase, error)
+
+	// GetRepository gets the knowledge base repository
+	// Parameters:
+	//   - ctx: Context with authentication and request information
+	//
+	// Returns:
+	//   - interfaces.KnowledgeBaseRepository: Knowledge base repository
+	GetRepository() KnowledgeBaseRepository
+
+	// ProcessKBDelete handles async knowledge base deletion task
+	// Parameters:
+	//   - ctx: Context information
+	//   - t: Asynq task containing KBDeletePayload
+	// Returns:
+	//   - Possible errors during deletion
+	ProcessKBDelete(ctx context.Context, t *asynq.Task) error
 }
 
 // KnowledgeBaseRepository defines the knowledge base repository interface
@@ -103,6 +120,15 @@ type KnowledgeBaseRepository interface {
 	//   - Possible errors such as record not existing, database errors, etc.
 	GetKnowledgeBaseByID(ctx context.Context, id string) (*types.KnowledgeBase, error)
 
+	// GetKnowledgeBaseByIDs queries knowledge bases by multiple IDs
+	// Parameters:
+	//   - ctx: Context information
+	//   - ids: List of knowledge base IDs
+	// Returns:
+	//   - List of knowledge base objects
+	//   - Possible errors such as database errors, etc.
+	GetKnowledgeBaseByIDs(ctx context.Context, ids []string) ([]*types.KnowledgeBase, error)
+
 	// ListKnowledgeBases lists all knowledge bases in the system
 	// Parameters:
 	//   - ctx: Context information
@@ -118,7 +144,7 @@ type KnowledgeBaseRepository interface {
 	// Returns:
 	//   - List of knowledge base objects
 	//   - Possible errors such as database errors, etc.
-	ListKnowledgeBasesByTenantID(ctx context.Context, tenantID uint) ([]*types.KnowledgeBase, error)
+	ListKnowledgeBasesByTenantID(ctx context.Context, tenantID uint64) ([]*types.KnowledgeBase, error)
 
 	// UpdateKnowledgeBase updates a knowledge base record
 	// Parameters:

@@ -10,9 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
-	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
 // PluginIntoChatMessage handles the transformation of search results into chat messages
@@ -34,6 +32,12 @@ func (p *PluginIntoChatMessage) ActivationEvents() []types.EventType {
 func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
 ) *PluginError {
+	pipelineInfo(ctx, "IntoChatMessage", "input", map[string]interface{}{
+		"session_id":       chatManage.SessionID,
+		"merge_result_cnt": len(chatManage.MergeResult),
+		"template_len":     len(chatManage.SummaryConfig.ContextTemplate),
+	})
+
 	// Extract content from merge results
 	passages := make([]string, len(chatManage.MergeResult))
 	for i, result := range chatManage.MergeResult {
@@ -44,6 +48,10 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 	// Parse the context template
 	tmpl, err := template.New("searchContent").Parse(chatManage.SummaryConfig.ContextTemplate)
 	if err != nil {
+		pipelineError(ctx, "IntoChatMessage", "parse_template", map[string]interface{}{
+			"session_id": chatManage.SessionID,
+			"error":      err.Error(),
+		})
 		return ErrTemplateParse.WithError(err)
 	}
 
@@ -51,26 +59,27 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 	weekdayName := []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
 	var userContent bytes.Buffer
 
-	// 验证用户查询的安全性
-	safeQuery, isValid := secutils.ValidateInput(chatManage.Query)
-	if !isValid {
-		logger.Errorf(ctx, "Invalid user query: %s", chatManage.Query)
-		return ErrTemplateExecute.WithError(fmt.Errorf("用户查询包含非法内容"))
-	}
-
 	// Execute template with context data
 	err = tmpl.Execute(&userContent, map[string]interface{}{
-		"Query":       safeQuery,                                // User's original query
+		"Query":       chatManage.Query,                         // User's original query
 		"Contexts":    passages,                                 // Extracted passages from search results
 		"CurrentTime": time.Now().Format("2006-01-02 15:04:05"), // Formatted current time
 		"CurrentWeek": weekdayName[time.Now().Weekday()],        // Current weekday in Chinese
 	})
 	if err != nil {
+		pipelineError(ctx, "IntoChatMessage", "render_template", map[string]interface{}{
+			"session_id": chatManage.SessionID,
+			"error":      err.Error(),
+		})
 		return ErrTemplateExecute.WithError(err)
 	}
 
 	// Set formatted content back to chat management
 	chatManage.UserContent = userContent.String()
+	pipelineInfo(ctx, "IntoChatMessage", "output", map[string]interface{}{
+		"session_id":       chatManage.SessionID,
+		"user_content_len": len(chatManage.UserContent),
+	})
 	return next()
 }
 
@@ -99,7 +108,9 @@ func enrichContentWithImageInfo(ctx context.Context, content string, imageInfoJS
 	var imageInfos []types.ImageInfo
 	err := json.Unmarshal([]byte(imageInfoJSON), &imageInfos)
 	if err != nil {
-		logger.Warnf(ctx, "Failed to parse ImageInfo: %v, using content only", err)
+		pipelineWarn(ctx, "IntoChatMessage", "image_parse_error", map[string]interface{}{
+			"error": err.Error(),
+		})
 		return content
 	}
 
@@ -125,7 +136,9 @@ func enrichContentWithImageInfo(ctx context.Context, content string, imageInfoJS
 	// 用于存储已处理的图片URL
 	processedURLs := make(map[string]bool)
 
-	logger.Infof(ctx, "Found %d Markdown image links in content", len(matches))
+	pipelineInfo(ctx, "IntoChatMessage", "image_markdown_links", map[string]interface{}{
+		"match_count": len(matches),
+	})
 
 	// 替换每个图片链接，添加描述和OCR文本
 	for _, match := range matches {
@@ -184,8 +197,10 @@ func enrichContentWithImageInfo(ctx context.Context, content string, imageInfoJS
 		content += "附加图片信息:\n" + strings.Join(additionalImageTexts, "\n")
 	}
 
-	logger.Debugf(ctx, "Enhanced content with image info: found %d Markdown images, added %d additional images",
-		len(matches), len(additionalImageTexts))
+	pipelineInfo(ctx, "IntoChatMessage", "image_enrich_summary", map[string]interface{}{
+		"markdown_images": len(matches),
+		"additional_imgs": len(additionalImageTexts),
+	})
 
 	return content
 }

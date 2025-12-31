@@ -5,32 +5,70 @@ import (
 	"encoding/json"
 )
 
+// SearchTargetType represents the type of search target
+type SearchTargetType string
+
+const (
+	// SearchTargetTypeKnowledgeBase - search entire knowledge base
+	SearchTargetTypeKnowledgeBase SearchTargetType = "knowledge_base"
+	// SearchTargetTypeKnowledge - search specific knowledge files within a knowledge base
+	SearchTargetTypeKnowledge SearchTargetType = "knowledge"
+)
+
+// SearchTarget represents a unified search target
+// Either search an entire knowledge base, or specific knowledge files within a knowledge base
+type SearchTarget struct {
+	// Type of search target
+	Type SearchTargetType `json:"type"`
+	// KnowledgeBaseID is the ID of the knowledge base to search
+	KnowledgeBaseID string `json:"knowledge_base_id"`
+	// KnowledgeIDs is the list of specific knowledge IDs to search within the knowledge base
+	// Only used when Type is SearchTargetTypeKnowledge
+	KnowledgeIDs []string `json:"knowledge_ids,omitempty"`
+}
+
+// SearchTargets is a list of search targets, pre-computed at request entry point
+type SearchTargets []*SearchTarget
+
+// GetAllKnowledgeBaseIDs returns all unique knowledge base IDs from the search targets
+func (st SearchTargets) GetAllKnowledgeBaseIDs() []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, t := range st {
+		if !seen[t.KnowledgeBaseID] {
+			seen[t.KnowledgeBaseID] = true
+			result = append(result, t.KnowledgeBaseID)
+		}
+	}
+	return result
+}
+
 // SearchResult represents the search result
 type SearchResult struct {
 	// ID
-	ID string `gorm:"column:id" json:"id"`
+	ID string `gorm:"column:id"              json:"id"`
 	// Content
-	Content string `gorm:"column:content" json:"content"`
+	Content string `gorm:"column:content"         json:"content"`
 	// Knowledge ID
-	KnowledgeID string `gorm:"column:knowledge_id" json:"knowledge_id"`
+	KnowledgeID string `gorm:"column:knowledge_id"    json:"knowledge_id"`
 	// Chunk index
-	ChunkIndex int `gorm:"column:chunk_index" json:"chunk_index"`
+	ChunkIndex int `gorm:"column:chunk_index"     json:"chunk_index"`
 	// Knowledge title
 	KnowledgeTitle string `gorm:"column:knowledge_title" json:"knowledge_title"`
 	// Start at
-	StartAt int `gorm:"column:start_at" json:"start_at"`
+	StartAt int `gorm:"column:start_at"        json:"start_at"`
 	// End at
-	EndAt int `gorm:"column:end_at" json:"end_at"`
+	EndAt int `gorm:"column:end_at"          json:"end_at"`
 	// Seq
-	Seq int `gorm:"column:seq" json:"seq"`
+	Seq int `gorm:"column:seq"             json:"seq"`
 	// Score
-	Score float64 `json:"score"`
+	Score float64 `                              json:"score"`
 	// Match type
-	MatchType MatchType `json:"match_type"`
+	MatchType MatchType `                              json:"match_type"`
 	// SubChunkIndex
-	SubChunkID []string `json:"sub_chunk_id"`
+	SubChunkID []string `                              json:"sub_chunk_id"`
 	// Metadata
-	Metadata map[string]string `json:"metadata"`
+	Metadata map[string]string `                              json:"metadata"`
 
 	// Chunk 类型
 	ChunkType string `json:"chunk_type"`
@@ -46,14 +84,21 @@ type SearchResult struct {
 	// Knowledge source
 	// Used to indicate the source of the knowledge, such as "url"
 	KnowledgeSource string `json:"knowledge_source"`
+
+	// ChunkMetadata stores chunk-level metadata (e.g., generated questions)
+	ChunkMetadata JSON `json:"chunk_metadata,omitempty"`
 }
 
 // SearchParams represents the search parameters
 type SearchParams struct {
-	QueryText        string  `json:"query_text"`
-	VectorThreshold  float64 `json:"vector_threshold"`
-	KeywordThreshold float64 `json:"keyword_threshold"`
-	MatchCount       int     `json:"match_count"`
+	QueryText            string   `json:"query_text"`
+	VectorThreshold      float64  `json:"vector_threshold"`
+	KeywordThreshold     float64  `json:"keyword_threshold"`
+	MatchCount           int      `json:"match_count"`
+	DisableKeywordsMatch bool     `json:"disable_keywords_match"`
+	DisableVectorMatch   bool     `json:"disable_vector_match"`
+	KnowledgeIDs         []string `json:"knowledge_ids"`
+	TagIDs               []string `json:"tag_ids"` // Tag IDs for filtering (used for FAQ priority filtering)
 }
 
 // Value implements the driver.Valuer interface, used to convert SearchResult to database value
@@ -76,7 +121,7 @@ func (c *SearchResult) Scan(value interface{}) error {
 // Pagination represents the pagination parameters
 type Pagination struct {
 	// Page
-	Page int `form:"page" json:"page" binding:"omitempty,min=1"`
+	Page int `form:"page"      json:"page"      binding:"omitempty,min=1"`
 	// Page size
 	PageSize int `form:"page_size" json:"page_size" binding:"omitempty,min=1,max=100"`
 }

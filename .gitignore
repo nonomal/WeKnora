@@ -23,16 +23,21 @@ node_modules/
 # 临时文件
 tmp/
 temp/
+logs/
+*.pid
 
 WeKnora
 /models/
-services/docreader/src/proto/__pycache__
 test/data/mswag.txt
 data/files/
 
-.python-version
 .venv/
+**/__pycache__
+.python-version
 
 ### macOS
 # General
 .DS_Store
+/scripts/scale_dev_jobs.sh
+server
+frontend/.vite

@@ -1,18 +1,15 @@
 package chatpipline
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
-	secutils "github.com/Tencent/WeKnora/internal/utils"
+	"github.com/Tencent/WeKnora/internal/utils"
 )
 
 // PluginIntoChatMessage handles the transformation of search results into chat messages
@@ -34,43 +31,104 @@ func (p *PluginIntoChatMessage) ActivationEvents() []types.EventType {
 func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
 ) *PluginError {
-	// Extract content from merge results
-	passages := make([]string, len(chatManage.MergeResult))
-	for i, result := range chatManage.MergeResult {
-		// 合并内容和图片信息
-		passages[i] = getEnrichedPassageForChat(ctx, result)
-	}
+	pipelineInfo(ctx, "IntoChatMessage", "input", map[string]interface{}{
+		"session_id":       chatManage.SessionID,
+		"merge_result_cnt": len(chatManage.MergeResult),
+		"template_len":     len(chatManage.SummaryConfig.ContextTemplate),
+	})
 
-	// Parse the context template
-	tmpl, err := template.New("searchContent").Parse(chatManage.SummaryConfig.ContextTemplate)
-	if err != nil {
-		return ErrTemplateParse.WithError(err)
-	}
+	// Separate FAQ and document results when FAQ priority is enabled
+	var faqResults, docResults []*types.SearchResult
+	var hasHighConfidenceFAQ bool
 
-	// Prepare weekday names for template
-	weekdayName := []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
-	var userContent bytes.Buffer
+	if chatManage.FAQPriorityEnabled {
+		for _, result := range chatManage.MergeResult {
+			if result.ChunkType == string(types.ChunkTypeFAQ) {
+				faqResults = append(faqResults, result)
+				// Check if this FAQ has high confidence (above direct answer threshold)
+				if result.Score >= chatManage.FAQDirectAnswerThreshold && !hasHighConfidenceFAQ {
+					hasHighConfidenceFAQ = true
+					pipelineInfo(ctx, "IntoChatMessage", "high_confidence_faq", map[string]interface{}{
+						"chunk_id":  result.ID,
+						"score":     fmt.Sprintf("%.4f", result.Score),
+						"threshold": chatManage.FAQDirectAnswerThreshold,
+					})
+				}
+			} else {
+				docResults = append(docResults, result)
+			}
+		}
+		pipelineInfo(ctx, "IntoChatMessage", "faq_separation", map[string]interface{}{
+			"faq_count":           len(faqResults),
+			"doc_count":           len(docResults),
+			"has_high_confidence": hasHighConfidenceFAQ,
+		})
+	}
 
 	// 验证用户查询的安全性
-	safeQuery, isValid := secutils.ValidateInput(chatManage.Query)
+	safeQuery, isValid := utils.ValidateInput(chatManage.Query)
 	if !isValid {
-		logger.Errorf(ctx, "Invalid user query: %s", chatManage.Query)
+		pipelineWarn(ctx, "IntoChatMessage", "invalid_query", map[string]interface{}{
+			"session_id": chatManage.SessionID,
+		})
 		return ErrTemplateExecute.WithError(fmt.Errorf("用户查询包含非法内容"))
 	}
 
-	// Execute template with context data
-	err = tmpl.Execute(&userContent, map[string]interface{}{
-		"Query":       safeQuery,                                // User's original query
-		"Contexts":    passages,                                 // Extracted passages from search results
-		"CurrentTime": time.Now().Format("2006-01-02 15:04:05"), // Formatted current time
-		"CurrentWeek": weekdayName[time.Now().Weekday()],        // Current weekday in Chinese
-	})
-	if err != nil {
-		return ErrTemplateExecute.WithError(err)
+	// Prepare weekday names
+	weekdayName := []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
+
+	var contextsBuilder strings.Builder
+
+	// Build contexts string based on FAQ priority strategy
+	if chatManage.FAQPriorityEnabled && len(faqResults) > 0 {
+		// Build structured context with FAQ prioritization
+		contextsBuilder.WriteString("### 资料来源 1：标准问答库 (FAQ)\n")
+		contextsBuilder.WriteString("【高置信度 - 请优先参考】\n")
+		for i, result := range faqResults {
+			passage := getEnrichedPassageForChat(ctx, result)
+			if hasHighConfidenceFAQ && i == 0 {
+				contextsBuilder.WriteString(fmt.Sprintf("[FAQ-%d] ⭐ 精准匹配: %s\n", i+1, passage))
+			} else {
+				contextsBuilder.WriteString(fmt.Sprintf("[FAQ-%d] %s\n", i+1, passage))
+			}
+		}
+
+		if len(docResults) > 0 {
+			contextsBuilder.WriteString("\n### 资料来源 2：参考文档\n")
+			contextsBuilder.WriteString("【补充资料 - 仅在FAQ无法解答时参考】\n")
+			for i, result := range docResults {
+				passage := getEnrichedPassageForChat(ctx, result)
+				contextsBuilder.WriteString(fmt.Sprintf("[DOC-%d] %s\n", i+1, passage))
+			}
+		}
+	} else {
+		// Original behavior: simple numbered list
+		passages := make([]string, len(chatManage.MergeResult))
+		for i, result := range chatManage.MergeResult {
+			passages[i] = getEnrichedPassageForChat(ctx, result)
+		}
+		for i, passage := range passages {
+			if i > 0 {
+				contextsBuilder.WriteString("\n\n")
+			}
+			contextsBuilder.WriteString(fmt.Sprintf("[%d] %s", i+1, passage))
+		}
 	}
 
+	// Replace placeholders in context template
+	userContent := chatManage.SummaryConfig.ContextTemplate
+	userContent = strings.ReplaceAll(userContent, "{{query}}", safeQuery)
+	userContent = strings.ReplaceAll(userContent, "{{contexts}}", contextsBuilder.String())
+	userContent = strings.ReplaceAll(userContent, "{{current_time}}", time.Now().Format("2006-01-02 15:04:05"))
+	userContent = strings.ReplaceAll(userContent, "{{current_week}}", weekdayName[time.Now().Weekday()])
+
 	// Set formatted content back to chat management
-	chatManage.UserContent = userContent.String()
+	chatManage.UserContent = userContent
+	pipelineInfo(ctx, "IntoChatMessage", "output", map[string]interface{}{
+		"session_id":       chatManage.SessionID,
+		"user_content_len": len(chatManage.UserContent),
+		"faq_priority":     chatManage.FAQPriorityEnabled,
+	})
 	return next()
 }
 
@@ -99,7 +157,9 @@ func enrichContentWithImageInfo(ctx context.Context, content string, imageInfoJS
 	var imageInfos []types.ImageInfo
 	err := json.Unmarshal([]byte(imageInfoJSON), &imageInfos)
 	if err != nil {
-		logger.Warnf(ctx, "Failed to parse ImageInfo: %v, using content only", err)
+		pipelineWarn(ctx, "IntoChatMessage", "image_parse_error", map[string]interface{}{
+			"error": err.Error(),
+		})
 		return content
 	}
 
@@ -125,7 +185,9 @@ func enrichContentWithImageInfo(ctx context.Context, content string, imageInfoJS
 	// 用于存储已处理的图片URL
 	processedURLs := make(map[string]bool)
 
-	logger.Infof(ctx, "Found %d Markdown image links in content", len(matches))
+	pipelineInfo(ctx, "IntoChatMessage", "image_markdown_links", map[string]interface{}{
+		"match_count": len(matches),
+	})
 
 	// 替换每个图片链接，添加描述和OCR文本
 	for _, match := range matches {
@@ -184,8 +246,10 @@ func enrichContentWithImageInfo(ctx context.Context, content string, imageInfoJS
 		content += "附加图片信息:\n" + strings.Join(additionalImageTexts, "\n")
 	}
 
-	logger.Debugf(ctx, "Enhanced content with image info: found %d Markdown images, added %d additional images",
-		len(matches), len(additionalImageTexts))
+	pipelineInfo(ctx, "IntoChatMessage", "image_enrich_summary", map[string]interface{}{
+		"markdown_images": len(matches),
+		"additional_imgs": len(additionalImageTexts),
+	})
 
 	return content
 }

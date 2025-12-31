@@ -9,6 +9,7 @@ const (
 	ElasticsearchRetrieverEngineType RetrieverEngineType = "elasticsearch"
 	InfinityRetrieverEngineType      RetrieverEngineType = "infinity"
 	ElasticFaissRetrieverEngineType  RetrieverEngineType = "elasticfaiss"
+	QdrantRetrieverEngineType        RetrieverEngineType = "qdrant"
 )
 
 // RetrieverType represents the type of retriever
@@ -29,6 +30,10 @@ type RetrieveParams struct {
 	Embedding []float32
 	// Knowledge base IDs
 	KnowledgeBaseIDs []string
+	// Knowledge IDs
+	KnowledgeIDs []string
+	// Tag IDs for filtering (used for FAQ priority filtering)
+	TagIDs []string
 	// Excluded knowledge IDs
 	ExcludeKnowledgeIDs []string
 	// Excluded chunk IDs
@@ -37,6 +42,8 @@ type RetrieveParams struct {
 	TopK int
 	// Similarity threshold
 	Threshold float64
+	// Knowledge type (e.g., "faq", "manual") - determines which index to use
+	KnowledgeType string
 	// Additional parameters, different retrievers may require different parameters
 	AdditionalParams map[string]interface{}
 	// Retriever type
@@ -48,7 +55,7 @@ type RetrieverEngineParams struct {
 	// Retriever engine type
 	RetrieverEngineType RetrieverEngineType `yaml:"retriever_engine_type" json:"retriever_engine_type"`
 	// Retriever type
-	RetrieverType RetrieverType `yaml:"retriever_type" json:"retriever_type"`
+	RetrieverType RetrieverType `yaml:"retriever_type"        json:"retriever_type"`
 }
 
 // IndexWithScore represents the index with score
@@ -67,10 +74,19 @@ type IndexWithScore struct {
 	KnowledgeID string
 	// Knowledge base ID
 	KnowledgeBaseID string
+	// Tag ID
+	TagID string
 	// Score
 	Score float64
 	// Match type
 	MatchType MatchType
+	// IsEnabled
+	IsEnabled bool
+}
+
+// GetScore returns the score for ScoreComparable interface
+func (i *IndexWithScore) GetScore() float64 {
+	return i.Score
 }
 
 // RetrieveResult represents the result of retrieval

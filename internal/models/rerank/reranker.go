@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
+	"github.com/Tencent/WeKnora/internal/models/provider"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -29,7 +29,6 @@ type RankResult struct {
 
 // Handles the RelevanceScore field by checking if RelevanceScore exists first, otherwise falls back to Score field
 func (r *RankResult) UnmarshalJSON(data []byte) error {
-
 	var temp struct {
 		Index          int          `json:"index"`
 		Document       DocumentInfo `json:"document"`
@@ -84,14 +83,25 @@ type RerankerConfig struct {
 	ModelName string
 	Source    types.ModelSource
 	ModelID   string
+	Provider  string // Provider identifier: openai, aliyun, zhipu, siliconflow, jina, generic
 }
 
-// NewReranker creates a reranker
+// NewReranker creates a reranker based on the configuration
 func NewReranker(config *RerankerConfig) (Reranker, error) {
-	// 根据URL判断模型来源，而不是依赖Source字段
-	if strings.Contains(config.BaseURL, "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank") {
+	// Use provider field if set, otherwise detect from URL using provider registry
+	providerName := provider.ProviderName(config.Provider)
+	if providerName == "" {
+		providerName = provider.DetectProvider(config.BaseURL)
+	}
+
+	switch providerName {
+	case provider.ProviderAliyun:
 		return NewAliyunReranker(config)
-	} else {
+	case provider.ProviderZhipu:
+		return NewZhipuReranker(config)
+	case provider.ProviderJina:
+		return NewJinaReranker(config)
+	default:
 		return NewOpenAIReranker(config)
 	}
 }

@@ -2,113 +2,97 @@
     <div class="dialogue-wrap">
         <div class="dialogue-answers">
             <div class="dialogue-title">
-                <span>基于知识库内容问答</span>
+                <span>{{ $t('createChat.title') }}</span>
             </div>
             <InputField @send-msg="sendMsg"></InputField>
         </div>
     </div>
     
-
-    <t-dialog v-model:visible="selectVisible" header="选择知识库" :confirmBtn="{ content: '开始对话', theme: 'primary' }" :onConfirm="confirmSelect" :onCancel="() => selectVisible = false">
-        <t-form :data="{ kb: selectedKbId }">
-            <t-form-item label="知识库">
-                <t-select v-model="selectedKbId" :loading="kbLoading" placeholder="请选择知识库">
-                    <t-option v-for="kb in kbList" :key="kb.id" :value="kb.id" :label="kb.name" />
-                </t-select>
-            </t-form-item>
-        </t-form>
-    </t-dialog>
+    <!-- 知识库编辑器（创建/编辑统一组件） -->
+    <KnowledgeBaseEditorModal 
+      :visible="uiStore.showKBEditorModal"
+      :mode="uiStore.kbEditorMode"
+      :kb-id="uiStore.currentKBId || undefined"
+      :initial-type="uiStore.kbEditorType"
+      @update:visible="(val) => val ? null : uiStore.closeKBEditor()"
+      @success="handleKBEditorSuccess"
+    />
 </template>
 <script setup lang="ts">
-import { ref, onUnmounted, watch } from 'vue';
+import { ref } from 'vue';
 import InputField from '@/components/Input-field.vue';
-import EmptyKnowledge from '@/components/empty-knowledge.vue';
-import { getSessionsList, createSessions, generateSessionsTitle } from "@/api/chat/index";
+import { createSessions } from "@/api/chat/index";
 import { useMenuStore } from '@/stores/menu';
+import { useSettingsStore } from '@/stores/settings';
+import { useUIStore } from '@/stores/ui';
 import { useRoute, useRouter } from 'vue-router';
-import useKnowledgeBase from '@/hooks/useKnowledgeBase';
-import { listKnowledgeBases } from '@/api/knowledge-base';
+import { MessagePlugin } from 'tdesign-vue-next';
+import { useI18n } from 'vue-i18n';
+import KnowledgeBaseEditorModal from '@/views/knowledge/KnowledgeBaseEditorModal.vue';
+import { useKnowledgeBaseCreationNavigation } from '@/hooks/useKnowledgeBaseCreationNavigation';
 
-let { cardList } = useKnowledgeBase()
 const router = useRouter();
 const route = useRoute();
 const usemenuStore = useMenuStore();
-const sendMsg = (value: string) => {
-    createNewSession(value);
+const settingsStore = useSettingsStore();
+const uiStore = useUIStore();
+const { t } = useI18n();
+const { navigateToKnowledgeBaseList } = useKnowledgeBaseCreationNavigation();
+
+const sendMsg = (value: string, modelId: string, mentionedItems: any[]) => {
+    createNewSession(value, modelId, mentionedItems);
 }
 
-const selectVisible = ref(false)
-const selectedKbId = ref<string>('')
-const kbList = ref<Array<{ id: string; name: string }>>([])
-const kbLoading = ref(false)
+async function createNewSession(value: string, modelId: string, mentionedItems: any[] = []) {
+    const selectedKbs = settingsStore.settings.selectedKnowledgeBases || [];
+    const selectedFiles = settingsStore.settings.selectedFiles || [];
 
-const ensureKbId = async (): Promise<string | null> => {
-    // 1) 优先使用当前路由上下文（如果来自某个知识库详情页）
-    const routeKb = (route.params as any)?.kbId as string
-    if (routeKb) return routeKb
-
-
-    // 3) 弹窗选择知识库（从接口拉取）
-    kbLoading.value = true
-    try {
-        const res: any = await listKnowledgeBases()
-        kbList.value = res?.data || []
-        if (kbList.value.length === 0) return null
-        selectedKbId.value = kbList.value[0].id
-        selectVisible.value = true
-        return null
-    } finally {
-        kbLoading.value = false
-    }
-}
-
-async function createNewSession(value: string) {
-    let knowledgeBaseId = await ensureKbId()
-    if (!knowledgeBaseId) {
-        // 等待用户在弹窗中选择
-        pendingValue.value = value
-        return
-    }
-
-    createSessions({ knowledge_base_id: knowledgeBaseId }).then(async res => {
-        if (res.data && res.data.id) {
-            await getTitle(res.data.id, value)
-        } else {
-            // 错误处理
-            console.error("创建会话失败");
-        }
-    }).catch(error => {
-        console.error("创建会话出错:", error);
-    })
-}
-
-const pendingValue = ref<string>('')
-const confirmSelect = async () => {
-    if (!selectedKbId.value) return
-    const value = pendingValue.value
-    pendingValue.value = ''
-    selectVisible.value = false
-    createSessions({ knowledge_base_id: selectedKbId.value }).then(async res => {
-        if (res.data && res.data.id) {
-            await getTitle(res.data.id, value, selectedKbId.value)
-        } else {
-            console.error('创建会话失败')
-        }
-    }).catch((e:any) => console.error('创建会话出错:', e))
-}
-
-const getTitle = async (session_id: string, value: string, kbId?: string) => {
-    const finalKbId = kbId || await ensureKbId();
-    if (!finalKbId) {
-        console.error('无法获取知识库ID');
-        return;
-    }
+    // 构建 session 数据，包含 Agent 配置
+    const sessionData: any = {};
     
-    let obj = { title: '新会话', path: `chat/${finalKbId}/${session_id}`, id: session_id, isMore: false, isNoTitle: true }
+    // 添加 Agent 配置（知识库信息在 agent_config 中）
+    sessionData.agent_config = {
+        enabled: true,
+        max_iterations: settingsStore.agentConfig.maxIterations,
+        temperature: settingsStore.agentConfig.temperature,
+        knowledge_bases: selectedKbs,  // 所有选中的知识库
+        knowledge_ids: selectedFiles,  // 所有选中的普通知识/文件
+        allowed_tools: settingsStore.agentConfig.allowedTools
+    };
+
+    try {
+        const res = await createSessions(sessionData);
+        if (res.data && res.data.id) {
+            await navigateToSession(res.data.id, value, modelId, mentionedItems);
+        } else {
+            console.error('[createChat] Failed to create session');
+            MessagePlugin.error(t('createChat.messages.createFailed'));
+        }
+    } catch (error) {
+        console.error('[createChat] Create session error:', error);
+        MessagePlugin.error(t('createChat.messages.createError'));
+    }
+}
+
+const navigateToSession = async (sessionId: string, value: string, modelId: string, mentionedItems: any[]) => {
+    const now = new Date().toISOString();
+    let obj = { 
+        title: t('createChat.newSessionTitle'), 
+        path: `chat/${sessionId}`, 
+        id: sessionId, 
+        isMore: false, 
+        isNoTitle: true,
+        created_at: now,
+        updated_at: now
+    };
     usemenuStore.updataMenuChildren(obj);
     usemenuStore.changeIsFirstSession(true);
-    usemenuStore.changeFirstQuery(value);
-    router.push(`/platform/chat/${finalKbId}/${session_id}`);
+    usemenuStore.changeFirstQuery(value, mentionedItems, modelId);
+    router.push(`/platform/chat/${sessionId}`);
+}
+
+const handleKBEditorSuccess = (kbId: string) => {
+    navigateToKnowledgeBaseList(kbId)
 }
 
 </script>

@@ -1,4 +1,4 @@
-import { get, post } from '../../utils/request';
+import { get, post, put } from '../../utils/request';
 
 // 初始化配置数据类型
 export interface InitializationConfig {
@@ -70,7 +70,65 @@ export interface DownloadTask {
     endTime?: string;
 }
 
-// 根据知识库ID执行配置更新
+// 简化版知识库配置更新接口（只传模型ID）
+export interface KBModelConfigRequest {
+    llmModelId: string
+    embeddingModelId: string
+    vlm_config?: {
+        enabled: boolean
+        model_id?: string
+    }
+    documentSplitting: {
+        chunkSize: number
+        chunkOverlap: number
+        separators: string[]
+    }
+    multimodal: {
+        enabled: boolean
+        storageType?: 'cos' | 'minio'
+        cos?: {
+            secretId: string
+            secretKey: string
+            region: string
+            bucketName: string
+            appId: string
+            pathPrefix: string
+        }
+        minio?: {
+            bucketName: string
+            useSSL: boolean
+            pathPrefix: string
+        }
+    }
+    nodeExtract: {
+        enabled: boolean
+        text: string
+        tags: string[]
+        nodes: Node[]
+        relations: Relation[]
+    }
+    questionGeneration?: {
+        enabled: boolean
+        questionCount: number
+    }
+}
+
+export function updateKBConfig(kbId: string, config: KBModelConfigRequest): Promise<any> {
+    return new Promise((resolve, reject) => {
+        console.log('开始知识库配置更新（简化版）...', kbId, config);
+        put(`/api/v1/initialization/config/${kbId}`, config)
+            .then((response: any) => {
+                console.log('知识库配置更新完成', response);
+                resolve(response);
+            })
+            .catch((error: any) => {
+                console.error('知识库配置更新失败:', error);
+                reject(error.error || error);
+            });
+    });
+}
+
+// 根据知识库ID执行配置更新（旧版，保留兼容性）
 export function initializeSystemByKB(kbId: string, config: InitializationConfig): Promise<any> {
     return new Promise((resolve, reject) => {
         console.log('开始知识库配置更新...', kbId, config);
@@ -100,8 +158,16 @@ export function checkOllamaStatus(): Promise<{ available: boolean; version?: str
     });
 }
 
-// 列出已安装的 Ollama 模型
-export function listOllamaModels(): Promise<string[]> {
+// Ollama 模型详细信息接口
+export interface OllamaModelInfo {
+    name: string;
+    size: number;
+    digest: string;
+    modified_at: string;
+}
+
+// 列出已安装的 Ollama 模型（详细信息）
+export function listOllamaModels(): Promise<OllamaModelInfo[]> {
     return new Promise((resolve, reject) => {
         get('/api/v1/initialization/ollama/models')
             .then((response: any) => {
@@ -212,6 +278,7 @@ export function testEmbeddingModel(modelConfig: {
     baseUrl?: string;
     apiKey?: string;
     dimension?: number;
+    provider?: string;
 }): Promise<{ available: boolean; message?: string; dimension?: number }> {
     return new Promise((resolve, reject) => {
         post('/api/v1/initialization/embedding/test', modelConfig)
@@ -252,7 +319,7 @@ export function testMultimodalFunction(testData: {
     vlm_base_url: string;
     vlm_api_key?: string;
     vlm_interface_type?: string;
-    storage_type?: 'cos'|'minio';
+    storage_type?: 'cos' | 'minio';
     // COS optional fields (required only when storage_type === 'cos')
     cos_secret_id?: string;
     cos_secret_key?: string;
@@ -310,24 +377,39 @@ export function testMultimodalFunction(testData: {
             headers['Authorization'] = `Bearer ${token}`;
         }
 
+        // 添加跨租户访问请求头（如果选择了其他租户）
+        const selectedTenantId = localStorage.getItem('weknora_selected_tenant_id');
+        const defaultTenantId = localStorage.getItem('weknora_tenant');
+        if (selectedTenantId) {
+            try {
+                const defaultTenant = defaultTenantId ? JSON.parse(defaultTenantId) : null;
+                const defaultId = defaultTenant?.id ? String(defaultTenant.id) : null;
+                if (selectedTenantId !== defaultId) {
+                    headers['X-Tenant-ID'] = selectedTenantId;
+                }
+            } catch (e) {
+                console.error('Failed to parse tenant info', e);
+            }
+        }
+
         // 使用原生fetch因为需要发送FormData
         fetch('/api/v1/initialization/multimodal/test', {
             method: 'POST',
             headers,
             body: formData
         })
-        .then(response => response.json())
-        .then((data: any) => {
-            if (data.success) {
-                resolve(data.data || {});
-            } else {
-                resolve({ success: false, message: data.message || '测试失败' });
-            }
-        })
-        .catch((error: any) => {
-            console.error('多模态测试失败:', error);
-            reject(error);
-        });
+            .then(response => response.json())
+            .then((data: any) => {
+                if (data.success) {
+                    resolve(data.data || {});
+                } else {
+                    resolve({ success: false, message: data.message || '测试失败' });
+                }
+            })
+            .catch((error: any) => {
+                console.error('多模态测试失败:', error);
+                reject(error);
+            });
     });
 }
 
@@ -335,7 +417,7 @@ export function testMultimodalFunction(testData: {
 export interface TextRelationExtractionRequest {
     text: string;
     tags: string[];
-    llmConfig: LLMConfig;
+    llm_config: LLMConfig;
 }
 
 export interface Node {
@@ -351,9 +433,9 @@ export interface Relation {
 
 export interface LLMConfig {
     source: 'local' | 'remote';
-    modelName: string;
-    baseUrl: string;
-    apiKey: string;
+    model_name: string;
+    base_url: string;
+    api_key: string;
 }
 
 export interface TextRelationExtractionResponse {
@@ -364,7 +446,7 @@ export interface TextRelationExtractionResponse {
 // 文本内容关系提取
 export function extractTextRelations(request: TextRelationExtractionRequest): Promise<TextRelationExtractionResponse> {
     return new Promise((resolve, reject) => {
-        post('/api/v1/initialization/extract/text-relation', request)
+        post('/api/v1/initialization/extract/text-relation', request, { timeout: 60000 })
             .then((response: any) => {
                 resolve(response.data || { nodes: [], relations: [] });
             })
@@ -377,7 +459,7 @@ export function extractTextRelations(request: TextRelationExtractionRequest): Pr
 
 export interface FabriTextRequest {
     tags: string[];
-    llmConfig: LLMConfig;
+    llm_config: LLMConfig;
 }
 
 export interface FabriTextResponse {
@@ -399,14 +481,14 @@ export function fabriText(request: FabriTextRequest): Promise<FabriTextResponse>
 }
 
 export interface FabriTagRequest {
-    llmConfig: LLMConfig; 
+    llm_config: LLMConfig;
 }
 
 export interface FabriTagResponse {
     tags: string[];
 }
 
-// 文本内容生成
+// 标签生成
 export function fabriTag(request: FabriTagRequest): Promise<FabriTagResponse> {
     return new Promise((resolve, reject) => {
         post('/api/v1/initialization/extract/fabri-tag', request)
@@ -416,6 +498,32 @@ export function fabriTag(request: FabriTagRequest): Promise<FabriTagResponse> {
             .catch((error: any) => {
                 console.error('标签生成失败:', error);
                 reject(error);
+            });
+    });
+}
+
+// 模型厂商信息类型
+export interface ModelProviderOption {
+    value: string;        // provider 标识符
+    label: string;        // 显示名称
+    description: string;  // 描述
+    defaultUrls: Record<string, string>;  // 按模型类型区分的默认 URL
+    modelTypes: string[]; // 支持的模型类型
+}
+
+// 获取模型厂商列表
+export function listModelProviders(modelType?: string): Promise<ModelProviderOption[]> {
+    return new Promise((resolve, reject) => {
+        const url = modelType
+            ? `/api/v1/models/providers?model_type=${encodeURIComponent(modelType)}`
+            : '/api/v1/models/providers';
+        get(url)
+            .then((response: any) => {
+                resolve(response.data || []);
+            })
+            .catch((error: any) => {
+                console.error('获取模型厂商列表失败:', error);
+                resolve([]); // 失败时返回空数组，前端可以回退到默认值
             });
     });
 }

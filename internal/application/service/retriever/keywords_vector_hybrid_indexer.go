@@ -51,7 +51,7 @@ func (v *KeywordsVectorHybridRetrieveEngineService) Index(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		embeddingMap[indexInfo.ChunkID] = embedding
+		embeddingMap[indexInfo.SourceID] = embedding
 	}
 	params["embedding"] = embeddingMap
 	return v.indexRepository.Save(ctx, indexInfo, params)
@@ -65,7 +65,7 @@ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Conte
 	if len(indexInfoList) == 0 {
 		return nil
 	}
-	params := make(map[string]any)
+
 	if slices.Contains(retrieverTypes, types.VectorRetrieverType) {
 		var contentList []string
 		for _, indexInfo := range indexInfoList {
@@ -77,14 +77,17 @@ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Conte
 			embeddings, err = embedder.BatchEmbedWithPool(ctx, embedder, contentList)
 			if err == nil {
 				break
+			} else {
+				logger.Errorf(ctx, "BatchEmbedWithPool failed: %v", err)
+				time.Sleep(100 * time.Millisecond)
 			}
-			time.Sleep(100 * time.Millisecond)
 		}
 		if err != nil {
 			return err
 		}
-		batchSize := 20
+		batchSize := 40
 		for i, indexChunk := range utils.ChunkSlice(indexInfoList, batchSize) {
+			params := make(map[string]any)
 			embeddingMap := make(map[string][]float32)
 			for j, indexInfo := range indexChunk {
 				embeddingMap[indexInfo.SourceID] = embeddings[i*batchSize+j]
@@ -99,6 +102,7 @@ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Conte
 	}
 	var err error
 	for _, indexChunk := range utils.ChunkSlice(indexInfoList, 10) {
+		params := make(map[string]any)
 		err = v.indexRepository.BatchSave(ctx, indexChunk, params)
 		if err != nil {
 			return err
@@ -109,16 +113,23 @@ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Conte
 
 // DeleteByChunkIDList deletes vectors by their chunk IDs
 func (v *KeywordsVectorHybridRetrieveEngineService) DeleteByChunkIDList(ctx context.Context,
-	indexIDList []string, dimension int,
+	indexIDList []string, dimension int, knowledgeType string,
 ) error {
-	return v.indexRepository.DeleteByChunkIDList(ctx, indexIDList, dimension)
+	return v.indexRepository.DeleteByChunkIDList(ctx, indexIDList, dimension, knowledgeType)
+}
+
+// DeleteBySourceIDList deletes vectors by their source IDs
+func (v *KeywordsVectorHybridRetrieveEngineService) DeleteBySourceIDList(ctx context.Context,
+	sourceIDList []string, dimension int, knowledgeType string,
+) error {
+	return v.indexRepository.DeleteBySourceIDList(ctx, sourceIDList, dimension, knowledgeType)
 }
 
 // DeleteByKnowledgeIDList deletes vectors by their knowledge IDs
 func (v *KeywordsVectorHybridRetrieveEngineService) DeleteByKnowledgeIDList(ctx context.Context,
-	knowledgeIDList []string, dimension int,
+	knowledgeIDList []string, dimension int, knowledgeType string,
 ) error {
-	return v.indexRepository.DeleteByKnowledgeIDList(ctx, knowledgeIDList, dimension)
+	return v.indexRepository.DeleteByKnowledgeIDList(ctx, knowledgeIDList, dimension, knowledgeType)
 }
 
 // Support returns the retriever types supported by this engine
@@ -153,11 +164,28 @@ func (v *KeywordsVectorHybridRetrieveEngineService) CopyIndices(
 	sourceToTargetChunkIDMap map[string]string,
 	targetKnowledgeBaseID string,
 	dimension int,
+	knowledgeType string,
 ) error {
 	logger.Infof(ctx, "Copy indices from knowledge base %s to %s, mapping relation count: %d",
 		sourceKnowledgeBaseID, targetKnowledgeBaseID, len(sourceToTargetChunkIDMap),
 	)
 	return v.indexRepository.CopyIndices(
-		ctx, sourceKnowledgeBaseID, sourceToTargetKBIDMap, sourceToTargetChunkIDMap, targetKnowledgeBaseID, dimension,
+		ctx, sourceKnowledgeBaseID, sourceToTargetKBIDMap, sourceToTargetChunkIDMap, targetKnowledgeBaseID, dimension, knowledgeType,
 	)
+}
+
+// BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch
+func (v *KeywordsVectorHybridRetrieveEngineService) BatchUpdateChunkEnabledStatus(
+	ctx context.Context,
+	chunkStatusMap map[string]bool,
+) error {
+	return v.indexRepository.BatchUpdateChunkEnabledStatus(ctx, chunkStatusMap)
+}
+
+// BatchUpdateChunkTagID updates the tag ID of chunks in batch
+func (v *KeywordsVectorHybridRetrieveEngineService) BatchUpdateChunkTagID(
+	ctx context.Context,
+	chunkTagMap map[string]string,
+) error {
+	return v.indexRepository.BatchUpdateChunkTagID(ctx, chunkTagMap)
 }

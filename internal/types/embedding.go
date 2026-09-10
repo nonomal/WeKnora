@@ -20,6 +20,9 @@ const (
 	MatchTypeParentChunk   // 父Chunk匹配类型
 	MatchTypeRelationChunk // 关系Chunk匹配类型
 	MatchTypeGraph
+	MatchTypeWebSearch    // 网络搜索匹配类型
+	MatchTypeDirectLoad   // Deprecated: reserved to preserve serialized enum values
+	MatchTypeDataAnalysis // 数据分析匹配类型
 )
 
 // IndexInfo contains information about indexed content
@@ -31,4 +34,8 @@ type IndexInfo struct {
 	ChunkID         string     // ID of the text chunk
 	KnowledgeID     string     // ID of the knowledge
 	KnowledgeBaseID string     // ID of the knowledge base
+	KnowledgeType   string     // Type of the knowledge (e.g., "faq", "manual")
+	TagID           string     // Tag ID for categorization (used for FAQ priority filtering)
+	IsEnabled       bool       // Whether the chunk is enabled for retrieval
+	IsRecommended   bool       // Whether the chunk is recommended
 }

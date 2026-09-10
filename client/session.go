@@ -16,23 +16,6 @@ import (
 	"strings"
 )
 
-// SessionStrategy defines session strategy
-type SessionStrategy struct {
-	MaxRounds         int            `json:"max_rounds"`          // Maximum number of rounds to maintain
-	EnableRewrite     bool           `json:"enable_rewrite"`      // Enable query rewrite
-	FallbackStrategy  string         `json:"fallback_strategy"`   // Fallback strategy
-	FallbackResponse  string         `json:"fallback_response"`   // Fixed fallback response content
-	EmbeddingTopK     int            `json:"embedding_top_k"`     // Top K for vector retrieval
-	KeywordThreshold  float64        `json:"keyword_threshold"`   // Keyword retrieval threshold
-	VectorThreshold   float64        `json:"vector_threshold"`    // Vector retrieval threshold
-	RerankModelID     string         `json:"rerank_model_id"`     // Rerank model ID
-	RerankTopK        int            `json:"rerank_top_k"`        // Top K for reranking
-	RerankThreshold   float64        `json:"reranking_threshold"` // Reranking threshold
-	SummaryModelID    string         `json:"summary_model_id"`    // Summary model ID
-	SummaryParameters *SummaryConfig `json:"summary_parameters"`  // Summary model parameters
-	NoMatchPrefix     string         `json:"no_match_prefix"`     // Fallback response prefix
-}
-
 // SummaryConfig defines summary configuration
 type SummaryConfig struct {
 	MaxTokens           int     `json:"max_tokens"`
@@ -47,34 +30,25 @@ type SummaryConfig struct {
 	Temperature         float64 `json:"temperature"`
 	Seed                int     `json:"seed"`
 	MaxCompletionTokens int     `json:"max_completion_tokens"`
+	Thinking            *bool   `json:"thinking"`
 }
 
 // CreateSessionRequest session creation request
+// Sessions are now knowledge-base-independent and serve as conversation containers.
+// All configuration comes from custom agent at query time.
 type CreateSessionRequest struct {
-	KnowledgeBaseID string           `json:"knowledge_base_id"` // Associated knowledge base ID
-	SessionStrategy *SessionStrategy `json:"session_strategy"`  // Session strategy
+	Title       string `json:"title"`       // Session title (optional)
+	Description string `json:"description"` // Session description (optional)
 }
 
 // Session session information
 type Session struct {
-	ID                string         `json:"id"`
-	TenantID          uint           `json:"tenant_id"`
-	KnowledgeBaseID   string         `json:"knowledge_base_id"`
-	Title             string         `json:"title"`
-	MaxRounds         int            `json:"max_rounds"`
-	EnableRewrite     bool           `json:"enable_rewrite"`
-	FallbackStrategy  string         `json:"fallback_strategy"`
-	FallbackResponse  string         `json:"fallback_response"`
-	EmbeddingTopK     int            `json:"embedding_top_k"`
-	KeywordThreshold  float64        `json:"keyword_threshold"`
-	VectorThreshold   float64        `json:"vector_threshold"`
-	RerankModelID     string         `json:"rerank_model_id"`
-	RerankTopK        int            `json:"rerank_top_k"`
-	RerankThreshold   float64        `json:"reranking_threshold"` // Reranking threshold
-	SummaryModelID    string         `json:"summary_model_id"`
-	SummaryParameters *SummaryConfig `json:"summary_parameters"`
-	CreatedAt         string         `json:"created_at"`
-	UpdatedAt         string         `json:"updated_at"`
+	ID          string `json:"id"`
+	TenantID    uint64 `json:"tenant_id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 // SessionResponse session response
@@ -173,6 +147,25 @@ func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
 	return parseResponse(resp, &response)
 }
 
+// BatchDeleteSessions deletes multiple sessions by their IDs.
+func (c *Client) BatchDeleteSessions(ctx context.Context, sessionIDs []string) error {
+	request := struct {
+		IDs []string `json:"ids"`
+	}{IDs: sessionIDs}
+
+	resp, err := c.doRequest(ctx, http.MethodDelete, "/api/v1/sessions/batch", request, nil)
+	if err != nil {
+		return err
+	}
+
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message,omitempty"`
+	}
+
+	return parseResponse(resp, &response)
+}
+
 // GenerateTitleRequest title generation request
 type GenerateTitleRequest struct {
 	Messages []Message `json:"messages"`
@@ -182,6 +175,11 @@ type GenerateTitleRequest struct {
 type GenerateTitleResponse struct {
 	Success bool   `json:"success"`
 	Data    string `json:"data"`
+}
+
+// StopSessionRequest stop generation payload.
+type StopSessionRequest struct {
+	MessageID string `json:"message_id"`
 }
 
 // GenerateTitle generates a session title
@@ -200,78 +198,137 @@ func (c *Client) GenerateTitle(ctx context.Context, sessionID string, request *G
 	return response.Data, nil
 }
 
+// ImageAttachment represents an image in a chat request.
+// Frontend sends base64 data in the Data field; the backend saves, runs VLM analysis,
+// and populates URL/Caption before proceeding with the chat pipeline.
+type ImageAttachment struct {
+	Data    string `json:"data,omitempty"`    // base64 data URI (data:image/png;base64,...)
+	URL     string `json:"url,omitempty"`     // serving URL after saving to storage
+	Caption string `json:"caption,omitempty"` // VLM analysis result
+}
+
 // KnowledgeQARequest knowledge Q&A request
 type KnowledgeQARequest struct {
-	Query string `json:"query"`
+	Query            string            `json:"query"`              // Query text for knowledge base search
+	KnowledgeBaseIDs []string          `json:"knowledge_base_ids"` // Selected knowledge base IDs for this request
+	KnowledgeIDs     []string          `json:"knowledge_ids"`      // Selected knowledge IDs for this request
+	AgentEnabled     bool              `json:"agent_enabled"`      // Whether agent mode is enabled for this request
+	AgentID          string            `json:"agent_id"`           // Selected custom agent ID for this request
+	WebSearchEnabled bool              `json:"web_search_enabled"` // Whether web search is enabled for this request
+	SummaryModelID   string            `json:"summary_model_id"`   // Optional summary model ID (overrides session default)
+	DisableTitle     bool              `json:"disable_title"`      // Whether to disable auto title generation
+	Images           []ImageAttachment `json:"images,omitempty"`   // Attached images for multimodal chat
+	Channel          string            `json:"channel,omitempty"`  // Source channel: "web", "api", "im", etc.
+}
+
+// LLMToolCall represents a function/tool call from the LLM
+type LLMToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"` // "function"
+	Function FunctionCall `json:"function"`
+}
+
+// FunctionCall represents the function details
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string
 }
 
 type ResponseType string
 
 const (
-	ResponseTypeAnswer     ResponseType = "answer"
-	ResponseTypeReferences ResponseType = "references"
+	ResponseTypeAnswer       ResponseType = "answer"
+	ResponseTypeReferences   ResponseType = "references"
+	ResponseTypeThinking     ResponseType = "thinking"
+	ResponseTypeToolCall     ResponseType = "tool_call"
+	ResponseTypeToolResult   ResponseType = "tool_result"
+	ResponseTypeError        ResponseType = "error"
+	ResponseTypeReflection   ResponseType = "reflection"
+	ResponseTypeSessionTitle ResponseType = "session_title"
+	ResponseTypeAgentQuery   ResponseType = "agent_query"
+	ResponseTypeComplete     ResponseType = "complete"
 )
 
 // StreamResponse streaming response
 type StreamResponse struct {
-	ID                  string          `json:"id"`                   // Unique identifier
-	ResponseType        ResponseType    `json:"response_type"`        // Response type
-	Content             string          `json:"content"`              // Current content fragment
-	Done                bool            `json:"done"`                 // Whether completed
-	KnowledgeReferences []*SearchResult `json:"knowledge_references"` // Knowledge references
+	ID                  string                 `json:"id"`                             // Unique identifier
+	ResponseType        ResponseType           `json:"response_type"`                  // Response type
+	Content             string                 `json:"content"`                        // Current content fragment
+	Done                bool                   `json:"done"`                           // Whether completed
+	KnowledgeReferences []*SearchResult        `json:"knowledge_references,omitempty"` // Knowledge references
+	SessionID           string                 `json:"session_id,omitempty"`           // Session ID (for agent_query event)
+	AssistantMessageID  string                 `json:"assistant_message_id,omitempty"` // Assistant Message ID (for agent_query event)
+	ToolCalls           []LLMToolCall          `json:"tool_calls,omitempty"`           // Tool calls for streaming (partial)
+	Data                map[string]interface{} `json:"data,omitempty"`                 // Additional metadata for enhanced display
 }
 
-// KnowledgeQAStream knowledge Q&A streaming API
-func (c *Client) KnowledgeQAStream(ctx context.Context, sessionID string, query string, callback func(*StreamResponse) error) error {
+// KnowledgeQAStream knowledge Q&A streaming API.
+// Pass ResourceURLOptions to receive public HTTP(S) file URLs in the stream.
+func (c *Client) KnowledgeQAStream(
+	ctx context.Context,
+	sessionID string,
+	request *KnowledgeQARequest,
+	callback func(*StreamResponse) error,
+	opts ...ResourceURLOptions,
+) error {
 	path := fmt.Sprintf("/api/v1/knowledge-chat/%s", sessionID)
-	fmt.Printf("Starting KnowledgeQAStream request, session ID: %s, query: %s\n", sessionID, query)
+	debugLogger.Debug("knowledge_qa_stream_start", "session_id", sessionID, "query", request.Query)
 
-	request := &KnowledgeQARequest{
-		Query: query,
+	queryParams := url.Values{}
+	if len(opts) > 0 {
+		applyResourceURLQuery(queryParams, &opts[0])
 	}
 
-	resp, err := c.doRequest(ctx, http.MethodPost, path, request, nil)
+	resp, err := c.doRequestStream(ctx, http.MethodPost, path, request, queryParams)
 	if err != nil {
-		fmt.Printf("Request failed: %v\n", err)
+		debugLogger.Debug("request_failed", "error", err)
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		err := fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
-		fmt.Printf("Request returned error status: %v\n", err)
+		err := newAPIError(resp.StatusCode, body)
+		debugLogger.Debug("request_error_status", "error", err)
 		return err
 	}
 
-	fmt.Println("Successfully established SSE connection, processing data stream")
+	debugLogger.Debug("sse_connection_established")
 
 	// Use bufio to read SSE data line by line
 	scanner := bufio.NewScanner(resp.Body)
+	// Default 64KiB per-line cap truncates large SSE data lines (the
+	// references event bundles chunk contents that can reach hundreds of
+	// KiB). Raise the cap so those lines parse instead of erroring with
+	// "bufio.Scanner: token too long".
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var dataBuffer string
 	var eventType string
 	messageCount := 0
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Printf("Received SSE line: %s\n", line)
+		debugLogger.Debug("sse_line_received", "line", line)
 
 		// Empty line indicates the end of an event
 		if line == "" {
 			if dataBuffer != "" {
-				fmt.Printf("Processing data: %s, event type: %s\n", dataBuffer, eventType)
+				debugLogger.Debug("sse_data_processing", "data", dataBuffer, "event_type", eventType)
 				var streamResponse StreamResponse
 				if err := json.Unmarshal([]byte(dataBuffer), &streamResponse); err != nil {
-					fmt.Printf("Failed to parse SSE data: %v\n", err)
+					debugLogger.Debug("sse_parse_failed", "error", err)
 					return fmt.Errorf("failed to parse SSE data: %w", err)
 				}
 
 				messageCount++
-				fmt.Printf("Parsed message #%d, done status: %v\n", messageCount, streamResponse.Done)
+				debugLogger.Debug("sse_message_parsed", "count", messageCount, "done", streamResponse.Done)
 
 				if err := callback(&streamResponse); err != nil {
-					fmt.Printf("Callback processing failed: %v\n", err)
+					debugLogger.Debug("sse_callback_failed", "error", err)
 					return err
+				}
+				if streamResponse.ResponseType == ResponseTypeError && streamResponse.Done {
+					return NewSSEStreamError(streamResponse.Content)
 				}
 				dataBuffer = ""
 				eventType = ""
@@ -282,7 +339,7 @@ func (c *Client) KnowledgeQAStream(ctx context.Context, sessionID string, query 
 		// Process lines with event: prefix
 		if strings.HasPrefix(line, "event:") {
 			eventType = line[6:] // Remove "event:" prefix
-			fmt.Printf("Set event type: %s\n", eventType)
+			debugLogger.Debug("sse_event_type_set", "event_type", eventType)
 		}
 
 		// Process lines with data: prefix
@@ -292,22 +349,32 @@ func (c *Client) KnowledgeQAStream(ctx context.Context, sessionID string, query 
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Printf("Failed to read SSE stream: %v\n", err)
+		debugLogger.Debug("sse_read_failed", "error", err)
 		return fmt.Errorf("failed to read SSE stream: %w", err)
 	}
 
-	fmt.Printf("KnowledgeQAStream completed, processed %d messages\n", messageCount)
+	debugLogger.Debug("knowledge_qa_stream_completed", "message_count", messageCount)
 	return nil
 }
 
-// ContinueStream continues to receive an active stream for a session
-func (c *Client) ContinueStream(ctx context.Context, sessionID string, messageID string, callback func(*StreamResponse) error) error {
+// ContinueStream continues to receive an active stream for a session.
+// Pass ResourceURLOptions to receive public HTTP(S) file URLs in the stream.
+func (c *Client) ContinueStream(
+	ctx context.Context,
+	sessionID string,
+	messageID string,
+	callback func(*StreamResponse) error,
+	opts ...ResourceURLOptions,
+) error {
 	path := fmt.Sprintf("/api/v1/sessions/continue-stream/%s", sessionID)
 
 	queryParams := url.Values{}
 	queryParams.Add("message_id", messageID)
+	if len(opts) > 0 {
+		applyResourceURLQuery(queryParams, &opts[0])
+	}
 
-	resp, err := c.doRequest(ctx, http.MethodGet, path, nil, queryParams)
+	resp, err := c.doRequestStream(ctx, http.MethodGet, path, nil, queryParams)
 	if err != nil {
 		return err
 	}
@@ -315,11 +382,14 @@ func (c *Client) ContinueStream(ctx context.Context, sessionID string, messageID
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
+		return newAPIError(resp.StatusCode, body)
 	}
 
 	// Use bufio to read SSE data line by line
 	scanner := bufio.NewScanner(resp.Body)
+	// See KnowledgeQAStream: raise the per-line cap so large SSE data lines
+	// (references event) parse instead of erroring with "token too long".
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var dataBuffer string
 	var eventType string
 
@@ -337,6 +407,9 @@ func (c *Client) ContinueStream(ctx context.Context, sessionID string, messageID
 				if err := callback(&streamResponse); err != nil {
 					return err
 				}
+				if streamResponse.ResponseType == ResponseTypeError && streamResponse.Done {
+					return NewSSEStreamError(streamResponse.Content)
+				}
 				dataBuffer = ""
 				eventType = ""
 			}
@@ -361,10 +434,39 @@ func (c *Client) ContinueStream(ctx context.Context, sessionID string, messageID
 	return nil
 }
 
+// StopSession stops the generation for a specific assistant message under a session.
+func (c *Client) StopSession(ctx context.Context, sessionID string, messageID string) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("sessionID cannot be empty")
+	}
+	if strings.TrimSpace(messageID) == "" {
+		return fmt.Errorf("messageID cannot be empty")
+	}
+
+	path := fmt.Sprintf("/api/v1/sessions/%s/stop", sessionID)
+	resp, err := c.doRequest(ctx, http.MethodPost, path, &StopSessionRequest{
+		MessageID: messageID,
+	}, nil)
+	if err != nil {
+		return err
+	}
+
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message,omitempty"`
+	}
+
+	return parseResponse(resp, &response)
+}
+
 // SearchKnowledgeRequest knowledge search request
 type SearchKnowledgeRequest struct {
-	Query           string `json:"query"`             // Query content
-	KnowledgeBaseID string `json:"knowledge_base_id"` // Knowledge base ID
+	Query            string          `json:"query"`                        // Query content
+	KnowledgeBaseID  string          `json:"knowledge_base_id,omitempty"`  // Single knowledge base ID (for backward compatibility)
+	KnowledgeBaseIDs []string        `json:"knowledge_base_ids,omitempty"` // Knowledge base IDs (multi-KB support)
+	KnowledgeIDs     []string        `json:"knowledge_ids,omitempty"`      // Specific knowledge (file) IDs
+	TagIDs           []string        `json:"tag_ids,omitempty"`            // Tag IDs for filtering within a single KB
+	MentionedItems   []MentionedItem `json:"mentioned_items,omitempty"`    // Optional scoped tag mentions
 }
 
 // SearchKnowledgeResponse search results response
@@ -373,31 +475,44 @@ type SearchKnowledgeResponse struct {
 	Data    []*SearchResult `json:"data"`
 }
 
-// SearchKnowledge performs knowledge base search without LLM summarization
-func (c *Client) SearchKnowledge(ctx context.Context, request *SearchKnowledgeRequest) ([]*SearchResult, error) {
-	fmt.Printf("Starting SearchKnowledge request, knowledge base ID: %s, query: %s\n",
-		request.KnowledgeBaseID, request.Query)
+// SearchKnowledge performs knowledge base search without LLM summarization.
+// Pass ResourceURLOptions to receive public HTTP(S) file URLs in results.
+func (c *Client) SearchKnowledge(
+	ctx context.Context,
+	request *SearchKnowledgeRequest,
+	opts ...ResourceURLOptions,
+) ([]*SearchResult, error) {
+	debugLogger.Debug("search_knowledge_start",
+		"knowledge_base_ids", request.KnowledgeBaseIDs,
+		"knowledge_ids", request.KnowledgeIDs,
+		"query", request.Query,
+	)
 
-	resp, err := c.doRequest(ctx, http.MethodPost, "/api/v1/knowledge-search", request, nil)
+	queryParams := url.Values{}
+	if len(opts) > 0 {
+		applyResourceURLQuery(queryParams, &opts[0])
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodPost, "/api/v1/knowledge-search", request, queryParams)
 	if err != nil {
-		fmt.Printf("Request failed: %v\n", err)
+		debugLogger.Debug("request_failed", "error", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		err := fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
-		fmt.Printf("Request returned error status: %v\n", err)
+		err := newAPIError(resp.StatusCode, body)
+		debugLogger.Debug("request_error_status", "error", err)
 		return nil, err
 	}
 
 	var response SearchKnowledgeResponse
 	if err := parseResponse(resp, &response); err != nil {
-		fmt.Printf("Failed to parse response: %v\n", err)
+		debugLogger.Debug("response_parse_failed", "error", err)
 		return nil, err
 	}
 
-	fmt.Printf("SearchKnowledge completed, found %d results\n", len(response.Data))
+	debugLogger.Debug("search_knowledge_completed", "result_count", len(response.Data))
 	return response.Data, nil
 }

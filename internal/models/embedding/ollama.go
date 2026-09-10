@@ -12,11 +12,12 @@ import (
 
 // OllamaEmbedder implements text vectorization functionality using Ollama
 type OllamaEmbedder struct {
-	modelName            string
-	truncatePromptTokens int
-	ollamaService        *ollama.OllamaService
-	dimensions           int
-	modelID              string
+	modelName                 string
+	truncatePromptTokens      int
+	ollamaService             *ollama.OllamaService
+	dimensions                int
+	modelID                   string
+	supportsDimensionOverride bool
 	EmbedderPooler
 }
 
@@ -65,6 +66,10 @@ func (e *OllamaEmbedder) ensureModelAvailable(ctx context.Context) error {
 	return e.ollamaService.EnsureModelAvailable(ctx, e.modelName)
 }
 
+func (e *OllamaEmbedder) SetSupportsDimensionOverride(supported bool) {
+	e.supportsDimensionOverride = supported
+}
+
 // Embed converts text to vector
 func (e *OllamaEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	embedding, err := e.BatchEmbed(ctx, []string{text})
@@ -92,10 +97,15 @@ func (e *OllamaEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]fl
 		Input:   texts,
 		Options: make(map[string]interface{}),
 	}
+	if e.supportsDimensionOverride && e.dimensions > 0 {
+		req.Dimensions = e.dimensions
+	}
 
 	// Set truncation parameters
 	if e.truncatePromptTokens > 0 {
-		req.Options["truncate"] = e.truncatePromptTokens
+		req.Options["num_ctx"] = e.truncatePromptTokens
+		truncate := true
+		req.Truncate = &truncate
 	}
 
 	// Send request

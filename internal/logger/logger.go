@@ -3,14 +3,41 @@ package logger
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/trace"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
+
+// appLogger 使用私有实例，避免外部依赖改写 logrus 全局状态导致日志丢失
+var appLogger = logrus.New()
+
+var (
+	loggerMu      sync.Mutex
+	activeLogFile io.WriteCloser
+	ansiEscapeRE  = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+)
+
+// ansiStripWriter removes ANSI color/style sequences so file logs stay plain text
+// while stdout can still render colors in a terminal.
+type ansiStripWriter struct {
+	w io.Writer
+}
+
+func (s *ansiStripWriter) Write(p []byte) (int, error) {
+	_, err := s.w.Write(ansiEscapeRE.ReplaceAll(p, nil))
+	return len(p), err
+}
 
 // LogLevel 日志级别类型
 type LogLevel string
@@ -32,18 +59,92 @@ const (
 	colorBlue   = "\033[34m"
 	colorPurple = "\033[35m"
 	colorCyan   = "\033[36m"
+	colorWhite  = "\033[37m"
+	colorGray   = "\033[90m"
+	colorBold   = "\033[1m"
 	colorReset  = "\033[0m"
 )
 
 type CustomFormatter struct {
-	ForceColor bool // 是否强制使用颜色，即使在非终端环境下
+	ForceColor bool   // 是否强制使用颜色，即使在非终端环境下
+	Template   string // 自定义日志格式模板，通过 LOG_FORMAT 环境变量配置，为空则使用内置默认格式
+	// 模板占位符：%d=时间 %level=级别 %thread=goroutine %logger=caller %traceId=请求ID %msg=消息+结构化字段
+
+	// threadNeeded 缓存模板是否引用了 %thread，避免每条日志都调用一次 runtime.Stack。
+	threadNeeded bool
+}
+
+// levelColorFor 返回日志级别对应的 ANSI 颜色码，无颜色时返回空串。
+func levelColorFor(level logrus.Level) string {
+	switch level {
+	case logrus.DebugLevel:
+		return colorCyan
+	case logrus.InfoLevel:
+		return colorGreen
+	case logrus.WarnLevel:
+		return colorYellow
+	case logrus.ErrorLevel:
+		return colorRed
+	case logrus.FatalLevel:
+		return colorPurple
+	}
+	return ""
 }
 
 func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	timestamp := entry.Time.Format("2006-01-02 15:04:05.000")
 	level := strings.ToUpper(entry.Level.String())
 
-	// 根据日志级别设置颜色
+	// 提取已知字段
+	caller, _ := entry.Data["caller"].(string)
+	traceID, _ := entry.Data["request_id"].(string)
+
+	// 剩余结构化字段
+	keys := make([]string, 0, len(entry.Data))
+	for k := range entry.Data {
+		if k != "caller" && k != "request_id" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+
+	// 自定义模板模式
+	if f.Template != "" {
+		msg := entry.Message
+		for _, k := range keys {
+			msg += fmt.Sprintf(" %s=%v", k, entry.Data[k])
+		}
+		shortCaller := caller
+		if len(shortCaller) > 50 {
+			shortCaller = shortCaller[len(shortCaller)-50:]
+		}
+		// 仅在模板引用 %thread 时才取 goroutine ID，避免每条日志都执行 runtime.Stack
+		thread := ""
+		if f.threadNeeded {
+			thread = getGoroutineID()
+		}
+		// 级别染色在占位符替换阶段完成，避免后续在整行做 ReplaceAll
+		// 误染消息内容里出现的 "INFO"/"ERROR" 等字面字符串。
+		levelOut := level
+		if f.ForceColor {
+			if c := levelColorFor(entry.Level); c != "" {
+				levelOut = c + level + colorReset
+			}
+		}
+		// 使用 NewReplacer 做单趟替换，避免链式 ReplaceAll 时
+		// 前一个占位符的值里恰好包含后续占位符字面串导致的二次替换。
+		r := strings.NewReplacer(
+			"%d", timestamp,
+			"%level", levelOut,
+			"%thread", thread,
+			"%logger", shortCaller,
+			"%traceId", traceID,
+			"%msg", msg,
+		)
+		return []byte(r.Replace(f.Template) + "\n"), nil
+	}
+
+	// 默认格式（保持原有行为）
 	var levelColor, resetColor string
 	if f.ForceColor {
 		switch entry.Level {
@@ -63,44 +164,118 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 		resetColor = colorReset
 	}
 
-	// 取出 caller 字段
-	caller := ""
-	if val, ok := entry.Data["caller"]; ok {
-		caller = fmt.Sprintf("%v", val)
-	}
-
-	// 拼接字段部分：request_id 优先，其他排序后输出
 	fields := ""
 
 	// request_id 优先输出
 	if v, ok := entry.Data["request_id"]; ok {
-		fields += fmt.Sprintf("request_id=%v ", v)
+		if f.ForceColor {
+			fields += fmt.Sprintf("%s%v%s ",
+				colorBlue, v, colorReset)
+		} else {
+			fields += fmt.Sprintf("%v ", v)
+		}
 	}
 
 	// 其余字段排序后输出
-	keys := make([]string, 0, len(entry.Data))
-	for k := range entry.Data {
-		if k != "caller" && k != "request_id" {
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys)
 	for _, k := range keys {
-		fields += fmt.Sprintf("%s=%v ", k, entry.Data[k])
+		if f.ForceColor {
+			val := fmt.Sprintf("%v", entry.Data[k])
+			coloredVal := fmt.Sprintf("%s%s%s", colorWhite, val, colorReset)
+			if k == "error" {
+				coloredVal = fmt.Sprintf("%s%s%s", colorRed, val, colorReset)
+			}
+			fields += fmt.Sprintf("%s%s%s=%s ",
+				colorCyan, k, colorReset, coloredVal)
+		} else {
+			fields += fmt.Sprintf("%s=%v ", k, entry.Data[k])
+		}
 	}
 
 	fields = strings.TrimSpace(fields)
 
 	// 拼接最终输出内容，添加颜色
-	return []byte(fmt.Sprintf("%s%-5s%s[%s] [%s] %-20s | %s\n",
-		levelColor, level, resetColor, timestamp, fields, caller, entry.Message)), nil
+	if f.ForceColor {
+		coloredTimestamp := fmt.Sprintf("%s%s%s", colorGray, timestamp, resetColor)
+		coloredCaller := caller
+		if caller != "" {
+			coloredCaller = fmt.Sprintf("%s%s%s", colorPurple, caller, resetColor)
+		}
+		return []byte(fmt.Sprintf("%s%-5s%s[%s] [%s] %-20s | %s\n",
+			levelColor, level, resetColor, coloredTimestamp, fields, coloredCaller, entry.Message)), nil
+	}
+
+	return []byte(fmt.Sprintf("%-5s[%s] [%s] %-20s | %s\n",
+		level, timestamp, fields, caller, entry.Message)), nil
+}
+
+func getGoroutineID() string {
+	buf := make([]byte, 64)
+	buf = buf[:runtime.Stack(buf, false)]
+	// buf 格式: "goroutine 123 [running]:\n..."
+	i := 0
+	for i < len(buf) && buf[i] != ' ' {
+		i++
+	}
+	if i >= len(buf) {
+		return "0"
+	}
+	buf = buf[i+1:]
+	j := 0
+	for j < len(buf) && buf[j] != ' ' {
+		j++
+	}
+	return string(buf[:j])
 }
 
 // 初始化全局日志设置
 func init() {
+	ConfigureFromEnv()
+}
+
+// ConfigureFromEnv 重新从环境变量应用日志配置。
+// 这允许在 main() 中加载 .env 后，让 LOG_LEVEL / LOG_PATH 立即生效。
+func ConfigureFromEnv() {
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
+
+	if activeLogFile != nil {
+		_ = activeLogFile.Close()
+		activeLogFile = nil
+	}
+
+	// 根据环境变量设置全局日志级别
+	logLevel := getLogLevelFromEnv()
+	appLogger.SetLevel(logLevel)
+
+	writer := io.Writer(os.Stdout)
+	logPath := resolveLogPathFromEnv()
+	if logPath != "" {
+		file, err := openLogFile(logPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "logger: failed to open log file %s: %v\n", logPath, err)
+		} else {
+			activeLogFile = file
+			writer = io.MultiWriter(os.Stdout, &ansiStripWriter{w: file})
+		}
+	}
+
+	// 默认继续输出到 stdout，同时在可用时落盘到文件
+	appLogger.SetOutput(writer)
+
+	// 非终端（如 Docker 日志采集）禁用 ANSI 颜色，避免日志聚合/检索异常
+	forceColor := false
+	if fi, err := os.Stdout.Stat(); err == nil {
+		forceColor = (fi.Mode() & os.ModeCharDevice) != 0
+	}
+
 	// 设置日志格式而不修改全局时区
-	logrus.SetFormatter(&CustomFormatter{ForceColor: true})
-	logrus.SetReportCaller(false)
+	tmpl := resolveLogFormatFromEnv()
+	appLogger.SetFormatter(&CustomFormatter{
+		ForceColor:   forceColor,
+		Template:     tmpl,
+		threadNeeded: strings.Contains(tmpl, "%thread"),
+	})
+	appLogger.SetReportCaller(false)
 }
 
 // GetLogger 获取日志实例
@@ -108,12 +283,17 @@ func GetLogger(c context.Context) *logrus.Entry {
 	if logger := c.Value(types.LoggerContextKey); logger != nil {
 		return logger.(*logrus.Entry)
 	}
-	newLogger := logrus.New()
-	newLogger.SetFormatter(&CustomFormatter{ForceColor: true})
-	// 设置默认日志级别
-	newLogger.SetLevel(logrus.DebugLevel)
-	// 启用调用者信息
-	return logrus.NewEntry(newLogger)
+	return logrus.NewEntry(appLogger)
+}
+
+// SetOutput overrides the internal logger's output destination.
+// Intended for use in tests that need to capture and assert on log content
+// (e.g. verifying secrets are not written out). Restore the original writer
+// (usually os.Stdout) in a defer after the test.
+func SetOutput(w io.Writer) {
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
+	appLogger.SetOutput(w)
 }
 
 // SetLogLevel 设置日志级别
@@ -135,7 +315,80 @@ func SetLogLevel(level LogLevel) {
 		logLevel = logrus.InfoLevel
 	}
 
-	logrus.SetLevel(logLevel)
+	appLogger.SetLevel(logLevel)
+}
+
+// getLogLevelFromEnv 从环境变量读取日志级别配置
+func getLogLevelFromEnv() logrus.Level {
+	// 从环境变量读取LOG_LEVEL配置
+	logLevelStr := strings.ToLower(os.Getenv("LOG_LEVEL"))
+
+	switch logLevelStr {
+	case "debug":
+		return logrus.DebugLevel
+	case "info":
+		return logrus.InfoLevel
+	case "warn", "warning":
+		return logrus.WarnLevel
+	case "error":
+		return logrus.ErrorLevel
+	case "fatal":
+		return logrus.FatalLevel
+	default:
+		return logrus.DebugLevel // 无效配置时使用默认值
+	}
+}
+
+func resolveLogPathFromEnv() string {
+	if logPath := strings.TrimSpace(os.Getenv("LOG_PATH")); logPath != "" {
+		return filepath.Clean(logPath)
+	}
+	return defaultMacAppLogPath()
+}
+
+// resolveLogFormatFromEnv 从环境变量 LOG_FORMAT 读取自定义日志格式模板。
+// 为空则使用内置默认格式；非空则作为模板，支持占位符：
+// %d=时间 %level=级别 %thread=goroutine %logger=caller %traceId=请求ID %msg=消息+结构化字段
+func resolveLogFormatFromEnv() string {
+	return strings.TrimSpace(os.Getenv("LOG_FORMAT"))
+}
+
+func defaultMacAppLogPath() string {
+	execPath, err := os.Executable()
+	if err != nil || !strings.Contains(execPath, ".app/Contents/MacOS") {
+		return ""
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	appName := "WeKnora Lite"
+	if idx := strings.Index(execPath, ".app/Contents/MacOS"); idx >= 0 {
+		bundleName := filepath.Base(execPath[:idx+4])
+		if trimmed := strings.TrimSuffix(bundleName, ".app"); trimmed != "" {
+			appName = trimmed
+		}
+	}
+
+	return filepath.Join(homeDir, "Library", "Logs", appName, appName+".log")
+}
+
+func openLogFile(logPath string) (io.WriteCloser, error) {
+	dir := filepath.Dir(logPath)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+	}
+	return &lumberjack.Logger{
+		Filename:   logPath,
+		MaxSize:    50, // megabytes
+		MaxBackups: 3,
+		MaxAge:     28, // days
+		Compress:   true,
+	}, nil
 }
 
 // 添加调用者字段
@@ -202,6 +455,22 @@ func Warnf(c context.Context, format string, args ...interface{}) {
 	addCaller(GetLogger(c), 2).Warnf(format, args...)
 }
 
+// Fields aliases logrus.Fields so callers in other packages can use the
+// short form `logger.Fields{...}` without importing logrus directly.
+type Fields = logrus.Fields
+
+// WarnWithFields emits a warning with structured fields. Use this for
+// audit-relevant events (cross-tenant probes, invariant violations) so that
+// log aggregators can index the tenant/resource identifiers without
+// parsing free-form text. Format-string style (Warnf) is appropriate for
+// low-stakes diagnostic messages.
+func WarnWithFields(c context.Context, fields Fields, msg string) {
+	if fields == nil {
+		fields = Fields{}
+	}
+	addCaller(GetLogger(c), 2).WithFields(fields).Warn(msg)
+}
+
 // Error 输出错误级别的日志
 func Error(c context.Context, args ...interface{}) {
 	addCaller(GetLogger(c), 2).Error(args...)
@@ -234,19 +503,47 @@ func Fatalf(c context.Context, format string, args ...interface{}) {
 }
 
 // CloneContext 复制上下文中的关键信息到新上下文
+//
+// Which keys survive is decided by types.contextCloneAcrossDetach, which lives
+// next to where context keys are declared so that adding a key and deciding
+// its fate are the same edit. Keeping that decision here instead meant every
+// new key silently defaulted to being dropped.
 func CloneContext(ctx context.Context) context.Context {
 	newCtx := context.Background()
 
-	for _, k := range []types.ContextKey{
-		types.LoggerContextKey,
-		types.TenantIDContextKey,
-		types.RequestIDContextKey,
-		types.TenantInfoContextKey,
-	} {
+	for _, k := range types.ContextKeysClonedAcrossDetach() {
 		if v := ctx.Value(k); v != nil {
 			newCtx = context.WithValue(newCtx, k, v)
 		}
 	}
 
+	// Preserve the active OpenTelemetry span across the rebuild. The Langfuse
+	// *Trace handle above carries the trace id, but span PARENTING flows through
+	// the OTel span context (trace.SpanFromContext), which CloneContext would
+	// otherwise drop — orphaning child spans opened after a CloneContext (e.g.
+	// the agent engine's agent.execute becoming a separate trace from the HTTP
+	// root). Re-inject the recording span so children stitch to the same trace.
+	if sp := trace.SpanFromContext(ctx); sp.IsRecording() {
+		newCtx = trace.ContextWithSpan(newCtx, sp)
+	}
+
+	return newCtx
+}
+
+// CloneContextWithoutTrace copies the same identity keys as CloneContext but
+// drops the Langfuse *Trace handle and the OpenTelemetry span. Use it for
+// background work that must keep tenant/session identity yet must not attach
+// child spans (Docker Engine HTTP, idle sweeps, image pulls kicked off after
+// a tool has returned) onto the originating chat trace.
+func CloneContextWithoutTrace(ctx context.Context) context.Context {
+	newCtx := context.Background()
+	for _, k := range types.ContextKeysClonedAcrossDetach() {
+		if k == types.LangfuseTraceContextKey {
+			continue
+		}
+		if v := ctx.Value(k); v != nil {
+			newCtx = context.WithValue(newCtx, k, v)
+		}
+	}
 	return newCtx
 }

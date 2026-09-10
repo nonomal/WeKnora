@@ -1,7 +1,11 @@
-# 忽略.env文件和其他包含敏感信息的配置文件
-.env
-# 但不忽略示例文件
+# 忽略所有隐藏文件和目录
+.*
+# 但不忽略特定隐藏文件和目录
 !.env.example
+!.gitignore
+!.github/
+
+# 敏感文件
 *.pem
 *_key
 *_secret
@@ -9,8 +13,6 @@
 *.crt
 
 # IDE和编辑器文件
-.idea/
-.vscode/
 *.swp
 *.swo
 
@@ -23,16 +25,38 @@ node_modules/
 # 临时文件
 tmp/
 temp/
+logs/
+*.pid
 
 WeKnora
+WeKnora-lite
+cmd/desktop/build/bin/
 /models/
-services/docreader/src/proto/__pycache__
 test/data/mswag.txt
 data/files/
+data/weknora.db
+data/weknora.db-wal
+data/weknora.db-shm
+skills-lock.json
 
-.python-version
-.venv/
+web/
 
-### macOS
-# General
-.DS_Store
+**/__pycache__
+/scripts/scale_dev_jobs.sh
+/server
+frontend/.vite
+frontend/chrome-extension/
+WeKnora-Chrome-Extension
+packages/protoc-3.19.4-linux-x86_64.zip
+
+Claude.md
+
+# 本地测试脚本
+configure-ollama.sh
+fix-docker.sh
+
+# WeChat Mini Program local/private configuration
+miniprogram/project.private.config.json
+
+# Staging dir for the Docker sandbox self-check probe (removed after each run)
+.weknora-sandbox-check-*

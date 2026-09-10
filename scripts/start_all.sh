@@ -58,6 +58,20 @@ log_success() {
     printf "%b\n" "${GREEN}[SUCCESS]${NC} $1"
 }
 
+# Inject git short hash into the frontend image when composing from source.
+# docker-compose.yml interpolates VITE_FRONTEND_COMMIT; the build context is
+# frontend/ (no .git), so Vite cannot discover the commit on its own.
+export_frontend_build_args() {
+    if [ -n "${VITE_FRONTEND_COMMIT:-}" ]; then
+        export VITE_FRONTEND_COMMIT
+        return 0
+    fi
+    # shellcheck source=/dev/null
+    eval "$("$PROJECT_ROOT/scripts/get_version.sh" env)"
+    export VITE_FRONTEND_COMMIT="${COMMIT_ID:-unknown}"
+    log_info "VITE_FRONTEND_COMMIT=${VITE_FRONTEND_COMMIT}"
+}
+
 # 选择可用的 Docker Compose 命令（优先 docker compose，其次 docker-compose）
 DOCKER_COMPOSE_BIN=""
 DOCKER_COMPOSE_SUBCMD=""
@@ -310,6 +324,32 @@ check_platform() {
     log_info "当前平台：$PLATFORM"
 }
 
+# 预拉取沙箱镜像（Agent Skills 执行所需，仅拉取不启动）
+ensure_sandbox_image() {
+    local sandbox_image="wechatopenai/weknora-sandbox:${WEKNORA_VERSION:-latest}"
+
+    # 检查本地是否已存在沙箱镜像
+    if docker image inspect "$sandbox_image" &> /dev/null; then
+        log_success "沙箱镜像已就绪: $sandbox_image"
+        return 0
+    fi
+
+    log_info "沙箱镜像 ($sandbox_image) 未检测到，正在后台拉取..."
+    log_info "Agent Skills 功能依赖此镜像，首次执行前需要拉取完成"
+
+    # 后台拉取，不阻塞主流程
+    (
+        if PLATFORM=$PLATFORM "$DOCKER_COMPOSE_BIN" $DOCKER_COMPOSE_SUBCMD --profile sandbox pull sandbox 2>/dev/null; then
+            log_success "沙箱镜像拉取完成: $sandbox_image"
+        else
+            log_warning "沙箱镜像拉取失败，Agent Skills 功能可能不可用"
+            log_warning "可稍后手动拉取: $DOCKER_COMPOSE_BIN $DOCKER_COMPOSE_SUBCMD --profile sandbox pull sandbox"
+        fi
+    ) &
+
+    return 0
+}
+
 # 启动Docker容器
 start_docker() {
     log_info "正在启动Docker容器..."
@@ -329,8 +369,10 @@ start_docker() {
     
     check_platform
     
-    # 进入项目根目录再执行docker-compose命令
+	# 进入项目根目录再执行docker-compose命令
     cd "$PROJECT_ROOT"
+
+    export_frontend_build_args
     
     # 启动基本服务
     log_info "启动核心服务容器..."
@@ -342,7 +384,7 @@ start_docker() {
 	else
 		# 拉取最新镜像
 		log_info "拉取最新镜像..."
-		PLATFORM=$PLATFORM "$DOCKER_COMPOSE_BIN" $DOCKER_COMPOSE_SUBCMD up --build --pull always -d
+		PLATFORM=$PLATFORM "$DOCKER_COMPOSE_BIN" $DOCKER_COMPOSE_SUBCMD up --pull always -d
 	fi
     if [ $? -ne 0 ]; then
         log_error "Docker容器启动失败"
@@ -350,11 +392,14 @@ start_docker() {
     fi
     
     log_success "所有Docker容器已成功启动"
-    
+
     # 显示容器状态
     log_info "当前容器状态:"
 	"$DOCKER_COMPOSE_BIN" $DOCKER_COMPOSE_SUBCMD ps
-    
+
+    # 预拉取Sandbox镜像（Agent Skills 执行所需，仅拉取不启动）
+    ensure_sandbox_image
+
     return 0
 }
 
@@ -432,7 +477,12 @@ pull_images() {
         log_error "镜像拉取失败"
         return 1
     fi
-    
+
+    # 拉取 sandbox 镜像（sandbox 在 profile 中，需要单独拉取）
+    log_info "拉取沙箱镜像..."
+    PLATFORM=$PLATFORM "$DOCKER_COMPOSE_BIN" $DOCKER_COMPOSE_SUBCMD --profile sandbox pull sandbox 2>/dev/null || \
+        log_warning "沙箱镜像拉取失败（非必需，跳过）"
+
     log_success "所有镜像已成功拉取到最新版本"
     
     # 显示拉取的镜像信息
@@ -465,6 +515,8 @@ restart_container() {
     
     # 进入项目根目录再执行docker-compose命令
     cd "$PROJECT_ROOT"
+
+    export_frontend_build_args
     
     # 检查容器是否存在
 	if ! "$DOCKER_COMPOSE_BIN" $DOCKER_COMPOSE_SUBCMD ps --services | grep -q "^$container_name$"; then
@@ -531,6 +583,16 @@ check_environment() {
         fi
     fi
     
+    # 检查沙箱镜像
+    log_info "检查沙箱镜像..."
+    local sandbox_image="wechatopenai/weknora-sandbox:${WEKNORA_VERSION:-latest}"
+    if docker image inspect "$sandbox_image" &> /dev/null; then
+        log_success "沙箱镜像已就绪: $sandbox_image"
+    else
+        log_warning "沙箱镜像未找到: $sandbox_image (Agent Skills 功能需要此镜像)"
+        log_info "可通过以下命令拉取: $0 -p 或 docker pull $sandbox_image"
+    fi
+
     # 检查磁盘空间
     log_info "检查磁盘空间..."
     df -h | grep -E "(Filesystem|/$)"
@@ -538,7 +600,7 @@ check_environment() {
     # 检查内存
     log_info "检查内存使用情况..."
     if [ "$OS" = "Darwin" ]; then
-        vm_stat | perl -ne '/page size of (\d+)/ and $size=$1; /Pages free: (\d+)/ and print "Free Memory: ", $1 * $size / 1048576, " MB\n"'
+        vm_stat | perl -ne '/page size of (\d+)/ and $size=$1; /Pages free:\s*(\d+)/ and print "Free Memory: ", $1 * $size / 1048576, " MB\n"'
     else
         free -h | grep -E "(total|Mem:)"
     fi
@@ -705,7 +767,6 @@ else
             log_success "所有服务启动完成，可通过以下地址访问:"
             printf "%b\n" "${GREEN}  - 前端界面: http://localhost:${FRONTEND_PORT:-80}${NC}"
             printf "%b\n" "${GREEN}  - API接口: http://localhost:${APP_PORT:-8080}${NC}"
-            printf "%b\n" "${GREEN}  - Jaeger链路追踪: http://localhost:16686${NC}"
             echo ""
             log_info "正在持续输出容器日志（按 Ctrl+C 退出日志，容器不会停止）..."
             "$DOCKER_COMPOSE_BIN" $DOCKER_COMPOSE_SUBCMD logs app docreader postgres --since=10s -f
@@ -719,7 +780,6 @@ else
         log_success "Docker容器启动完成，可通过以下地址访问:"
         printf "%b\n" "${GREEN}  - 前端界面: http://localhost:${FRONTEND_PORT:-80}${NC}"
         printf "%b\n" "${GREEN}  - API接口: http://localhost:${APP_PORT:-8080}${NC}"
-        printf "%b\n" "${GREEN}  - Jaeger链路追踪: http://localhost:16686${NC}"
         echo ""
         log_info "正在持续输出容器日志（按 Ctrl+C 退出日志，容器不会停止）..."
         "$DOCKER_COMPOSE_BIN" $DOCKER_COMPOSE_SUBCMD logs app docreader postgres --since=10s -f

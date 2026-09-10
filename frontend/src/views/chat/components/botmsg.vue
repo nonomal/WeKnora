@@ -1,37 +1,174 @@
 <template>
-    <div class="bot_msg">
+    <div class="bot_msg" :class="{ 'is-embedded': embeddedMode }">
         <div style="display: flex;flex-direction: column; gap:8px">
-            <docInfo :session="session"></docInfo>
-            <deepThink :deepSession="session" v-if="session.showThink"></deepThink>
-        </div>
-        <div ref="parentMd">
-            <!-- 消息正在总结中则渲染加载gif  -->
-            <img v-if="session.thinking" class="botanswer_laoding_gif" src="@/assets/img/botanswer_loading.gif"
-                alt="正在总结答案……">
-            <div v-for="(item, index) in processedMarkdown" :key="index">
-                <img class="ai-markdown-img" @click="preview(item)" v-if="isLink(item)" :src="item" alt="">
-                <div v-else class="ai-markdown-template" v-html="processMarkdown(item)"></div>
+            <!-- 显示@的知识库和文件（非 Agent 模式下显示） -->
+            <div v-if="!session.isAgentMode && mentionedItems && mentionedItems.length > 0" class="mentioned_items">
+                <span v-for="item in mentionedItems" :key="item.id" class="mentioned_tag" :class="[
+                    mentionTagClass(item)
+                ]">
+                    <span class="tag_icon">
+                        <t-icon v-if="item.type === 'kb'"
+                            :name="item.kb_type === 'faq' ? 'chat-bubble-help' : 'folder'" />
+                        <t-icon v-else :name="mentionTagIcon(item)" />
+                    </span>
+                    <span class="tag_name">{{ item.name }}</span>
+                </span>
             </div>
-            <div v-if="isImgLoading" class="img_loading"><t-loading size="small"></t-loading><span>加载中...</span></div>
+            <div v-if="session.isRagMode" class="rag-answer-stack">
+                <RagPipelineProgress :session="session" :embedded-mode="embeddedMode" />
+                <AgentStreamDisplay v-if="session.isAgentMode" :session="session" :session-id="sessionId"
+                    :user-query="userQuery" :rag-mode="true" :follow-up-loading="followUpLoading"
+                    @render-complete-change="emit('render-complete-change', $event)" />
+            </div>
+            <template v-else>
+                <!-- A plain answer has no timeline to put the memory row on, so
+                     it gets the standalone row. Agent turns render theirs inside
+                     the agent timeline instead, next to the steps it belongs
+                     with. -->
+                <RagPipelineProgress v-if="!session.isAgentMode && session.used_memories?.length"
+                    :session="session" :embedded-mode="embeddedMode" memory-only />
+                <docInfo v-if="session.knowledge_references?.length" :session="session"></docInfo>
+                <AgentStreamDisplay :session="session" :session-id="sessionId" :user-query="userQuery"
+                    v-if="session.isAgentMode" :follow-up-loading="followUpLoading"
+                    @render-complete-change="emit('render-complete-change', $event)" />
+            </template>
+            <deepThink :deepSession="session" v-if="session.showThink && !session.isAgentMode"></deepThink>
+        </div>
+        <!-- 非 Agent 模式下才显示传统的 markdown 渲染 -->
+        <div ref="parentMd" v-if="!session.hideContent && !session.isAgentMode">
+            <!-- 直接渲染完整内容，避免切分导致的问题，样式与 thinking 一致 -->
+            <!-- 只有当有实际内容时才显示包围框 -->
+            <div class="content-wrapper" v-if="hasActualContent">
+                <div class="ai-markdown-template markdown-content" v-stable-html="renderedHTML">
+                </div>
+            </div>
+            <!-- 复制和添加到知识库按钮 - 非 Agent 模式下显示 -->
+            <div v-if="answerFullyRendered && (content || session.content)" class="answer-toolbar">
+                <t-button size="small" variant="outline" shape="round" @click.stop="handleCopyAnswer"
+                    :title="$t('agent.copy')">
+                    <t-icon name="copy" />
+                </t-button>
+                <t-button size="small" variant="outline" shape="round" @click.stop="handleAddToKnowledge"
+                    :title="$t('agent.addToKnowledgeBase')">
+                    <t-icon name="bookmark-add" />
+                </t-button>
+                <!-- Skill artifact download: only shown when this reply's
+                     assistant message actually recorded any generated files.
+                     Emptiness is the default: the button stays hidden for
+                     conversational messages that never touched a skill. -->
+                <span v-if="hasArtifacts || artifactsCollecting" class="answer-toolbar__artifact"
+                    :class="{ 'is-collecting': artifactButtonCollecting, 'is-arrived': artifactArrived }"
+                    @animationend="onArtifactArriveEnd">
+                    <t-button size="small" variant="outline" shape="round"
+                        :disabled="artifactButtonCollecting"
+                        :title="hasArtifacts ? $t('agent.artifactDrawer.buttonTitle') : $t('agent.artifactDrawer.collecting')"
+                        @click.stop="openArtifactDrawer()">
+                        <t-icon v-if="artifactButtonCollecting" name="loading" class="answer-toolbar__artifact-spinner" />
+                        <t-icon v-else name="folder" />
+                    </t-button>
+                    <span v-if="hasArtifacts" class="answer-toolbar__artifact-count" aria-hidden="true">{{ artifactCount }}</span>
+                </span>
+                <!-- Fallback 提示图标 -->
+                <t-tooltip v-if="session.is_fallback" :content="$t('chat.fallbackHint')" placement="top">
+                    <t-button size="small" variant="outline" shape="round" class="fallback-icon-btn">
+                        <t-icon name="info-circle" />
+                    </t-button>
+                </t-tooltip>
+                <ChatRequestInfoButton v-if="showRequestInfo" :session="session" :session-id="sessionId" />
+                <transition name="follow-up-toolbar-loading">
+                    <span v-if="followUpLoading" class="answer-toolbar__follow-up-loading" role="status"
+                        aria-live="polite">
+                        <t-icon name="lightbulb" />
+                        <span class="answer-toolbar__follow-up-label">{{ t('chat.followUpQuestionsLoading') }}</span>
+                    </span>
+                </transition>
+            </div>
+            <div v-if="isImgLoading" class="img_loading"><t-loading size="small"></t-loading><span>{{
+                $t('common.loading') }}</span></div>
         </div>
         <picturePreview :reviewImg="reviewImg" :reviewUrl="reviewUrl" @closePreImg="closePreImg"></picturePreview>
+        <Teleport to="body">
+            <ChatCitationFloat :float="citationFloat" :on-enter="cancelCitationClose"
+                :on-leave="scheduleCitationClose" />
+        </Teleport>
+        <ChatArtifactsDrawer
+            v-if="hasArtifacts && embeddedMode"
+            v-model:visible="showArtifactDrawer"
+            :session-id="sessionId"
+            :message-id="messageIdForArtifacts"
+            :artifacts="artifactList"
+            :preview-index="artifactPreviewIndex"
+        />
     </div>
 </template>
 <script setup>
-import { onMounted, watch, computed, ref, reactive, defineProps, nextTick } from 'vue';
-import { marked } from 'marked';
+import { onMounted, onBeforeUnmount, watch, computed, ref, reactive, nextTick, onUpdated } from 'vue';
+import 'katex/dist/katex.min.css';
 import docInfo from './docInfo.vue';
 import deepThink from './deepThink.vue';
+import AgentStreamDisplay from './AgentStreamDisplay.vue';
+import RagPipelineProgress from './RagPipelineProgress.vue';
+import ChatRequestInfoButton from '@/components/ChatRequestInfoButton.vue';
+import ChatCitationFloat from '@/components/ChatCitationFloat.vue';
 import picturePreview from '@/components/picture-preview.vue';
-import { sanitizeHTML, safeMarkdownToHTML, createSafeImage, isValidImageURL } from '@/utils/security';
+import ChatArtifactsDrawer from './ChatArtifactsDrawer.vue';
+import { isCollectingSkillArtifacts } from '@/utils/skillArtifacts';
+import { useArtifactArriveMotion } from '@/composables/useArtifactArriveMotion';
+import { useChatSandboxPanel } from '@/composables/useChatSandboxPanel';
+import { persistedAssistantId } from '@/utils/steerStreamFork';
+import { sanitizeMarkdownHTML, safeMarkdownToHTML, createSafeImage, isValidImageURL, hydrateProtectedFileImages } from '@/utils/security';
+import {
+    artifactIndexFromEventTarget,
+    hydrateArtifactImages,
+    isArtifactRefHref,
+    renderArtifactReference,
+} from '@/utils/sandboxArtifactRefs';
+import { useI18n } from 'vue-i18n';
+import { MessagePlugin } from 'tdesign-vue-next';
+import { useUIStore } from '@/stores/ui';
+import {
+    buildManualMarkdown,
+    formatManualTitle,
+} from '@/utils/chatMessageShared';
+import { copyWithToast } from '@/utils/clipboard';
+import {
+    createChatMarkdownRenderer,
+    renderChatMarkdown,
+} from '@/utils/chatMarkdownRenderer';
+import {
+    createMermaidCodeRenderer,
+    ensureMermaidInitialized,
+    renderMermaidInContainer,
+    enhanceMarkdownContainer,
+} from '@/utils/mermaidShared';
+import { refreshMarkdownEnhancements } from '@/utils/markdownEnhancements';
+import { useChatCitationPopover } from '@/composables/useChatCitationPopover';
+import { useTypewriter } from '@/composables/useTypewriter';
+import { vStableHtml } from '@/directives/stableHtml';
+import { SKILL_ICON } from '@/types/mention';
 
-marked.use({
-    mangle: false,
-    headerIds: false,
-});
-const emit = defineEmits(['scroll-bottom'])
-const renderer = new marked.Renderer();
+ensureMermaidInitialized();
+
+const mentionTagClass = (item) => {
+    if (item.type === 'kb') return item.kb_type === 'faq' ? 'faq-tag' : 'kb-tag';
+    return `${item.type || 'file'}-tag`;
+};
+
+const mentionTagIcon = (item) => {
+    if (item.type === 'tag') return 'tag';
+    if (item.type === 'mcp') return 'tools';
+    if (item.type === 'skill') return SKILL_ICON;
+    return 'file';
+};
+
+const emit = defineEmits(['scroll-bottom', 'render-complete-change'])
+const { t } = useI18n()
+const uiStore = useUIStore();
 let parentMd = ref()
+const { float: citationFloat, rebind: rebindCitations, cancelClose: cancelCitationClose, scheduleClose: scheduleCitationClose } = useChatCitationPopover(parentMd, {
+    getKnowledgeReferences: () => props.session?.knowledge_references,
+    sessionId: () => props.sessionId,
+});
 let reviewUrl = ref('')
 let reviewImg = ref(false)
 let isImgLoading = ref(false);
@@ -45,177 +182,362 @@ const props = defineProps({
         type: Object,
         required: false
     },
+    userQuery: {
+        type: String,
+        required: false,
+        default: ''
+    },
     isFirstEnter: {
         type: Boolean,
         required: false
+    },
+    embeddedMode: {
+        type: Boolean,
+        default: false
+    },
+    sessionId: {
+        type: String,
+        default: ''
+    },
+    followUpLoading: {
+        type: Boolean,
+        default: false
     }
 });
-const processedMarkdown = ref([]);
+
+const showRequestInfo = computed(() => !!(props.session?.request_id || props.session?.id));
+
+// -----------------------------------------------------------------------------
+// Skill artifact download (drawer in embedded mode; sandbox panel otherwise)
+// -----------------------------------------------------------------------------
+// The download button is opt-in per message: the toolbar checks
+// `hasArtifacts` and only renders when the assistant message actually
+// recorded a file. In the main app this opens the sandbox panel's artifacts
+// tab. Embedded chat still uses ChatArtifactsDrawer.
+//
+// NOTE: this file's <script setup> block is plain JS (no lang="ts"), so we
+// stay away from TypeScript-only syntax like `as any[]`.
+const showArtifactDrawer = ref(false);
+const sandboxPanel = useChatSandboxPanel();
+const artifactList = computed(() => {
+    const raw = props.session && props.session.artifacts;
+    const list = Array.isArray(raw) ? raw : [];
+    // Enrich each entry with its position so the download endpoint can
+    // resolve it. Server responses already include `index` when they come
+    // via listMessageArtifacts; SSE payloads that land through Message.Artifacts
+    // omit it. Normalising here keeps ChatArtifactsDrawer index-agnostic.
+    return list.map((a, i) => ({ index: i, ...a }));
+});
+const hasArtifacts = computed(() => artifactList.value.length > 0);
+const artifactCount = computed(() => artifactList.value.length);
+const { artifactArrived, onArtifactArriveEnd } = useArtifactArriveMotion(artifactCount);
+const artifactsCollecting = computed(() => isCollectingSkillArtifacts(props.session));
+const artifactButtonCollecting = computed(() => artifactsCollecting.value && !hasArtifacts.value);
+const messageIdForArtifacts = computed(() => {
+    // Steered segments have synthetic row IDs; artifact APIs address the
+    // persisted assistant. Keep request_id as the in-flight fallback.
+    return persistedAssistantId(props.session) || String(props.session?.request_id || '');
+});
+// Set when the drawer is opened by clicking an inline artifact card, so it
+// lands directly on that file's preview instead of the list.
+const artifactPreviewIndex = ref(null);
+function openArtifactDrawer(previewIndex = null) {
+    if (!hasArtifacts.value) return;
+    if (sandboxPanel && !props.embeddedMode) {
+        if (previewIndex == null) {
+            sandboxPanel.toggleArtifacts(messageIdForArtifacts.value);
+        } else {
+            sandboxPanel.open('artifacts', {
+                messageId: messageIdForArtifacts.value,
+                previewIndex,
+            });
+        }
+        return;
+    }
+    artifactPreviewIndex.value = previewIndex;
+    showArtifactDrawer.value = true;
+}
+
+const artifactRefContext = computed(() => {
+    const messageId = messageIdForArtifacts.value;
+    if (!props.sessionId || !messageId) return null;
+    return { sessionId: props.sessionId, messageId };
+});
+
+const artifactRefLabels = computed(() => ({
+    previewHint: t('agent.artifactDrawer.inlinePreviewHint'),
+    missingHint: t('agent.artifactDrawer.inlineMissing'),
+}));
+
 const preview = (url) => {
     nextTick(() => {
         reviewUrl.value = url;
         reviewImg.value = true
     })
 }
-const removeImg = () => {
-    nextTick(() => {
-        const images = parentMd.value.querySelectorAll('img.ai-markdown-img');
-        if (images) {
-            images.forEach(async item => {
-                const isValid = await checkImage(item.src);
-                if (!isValid) {
-                    item.remove();
-                }
-            })
-        }
-    })
-}
+
 const closePreImg = () => {
     reviewImg.value = false
     reviewUrl.value = '';
 }
-const debounce = (fn, delay) => {
-    let timer
-    return (...args) => {
-        clearTimeout(timer)
-        timer = setTimeout(() => fn(...args), delay)
-    }
-}
-const checkImage = (url) => {
-    return new Promise((resolve) => {
-        const img = new Image();
-        img.onload = () => {
-            resolve(true);
-        }
-        img.onerror = () => resolve(false);
-        img.src = url;
+
+const markdownRenderer = createChatMarkdownRenderer({
+    codeRenderer: createMermaidCodeRenderer('mermaid-botmsg'),
+    imageRenderer: ({ href, title, text }) => {
+        // A sandbox-generated file shares the resource:// form with every other
+        // protected image, so it is matched against this message's artifacts
+        // first. Anything that does not belong to this reply falls through to
+        // the ordinary protected-image path.
+        const artifactHtml = renderArtifactReference({
+            href,
+            alt: text || '',
+            artifacts: artifactList.value,
+            labels: artifactRefLabels.value,
+            context: artifactRefContext.value,
+            streaming: !props.session?.is_completed,
+        });
+        if (artifactHtml !== null) return artifactHtml;
+        return createSafeImage(href, text || '', title || '');
+    },
+    invalidImageHtml: () => `<p>${t('error.invalidImageLink')}</p>`,
+    isValidImageUrl: (href) => isArtifactRefHref(href) || isValidImageURL(href),
+});
+
+// 计算属性：将 Markdown 文本转换为 tokens
+const mentionedItems = computed(() => {
+    return props.session?.mentioned_items || [];
+});
+
+// Smooth the streamed answer into a steady typewriter cadence (shared with the
+// Agent path). Copy/toolbar still read the full content; only display is paced.
+const answerText = computed(() => {
+    const text = props.content || props.session?.content || '';
+    return typeof text === 'string' ? text : '';
+});
+const { displayed: typedAnswer } = useTypewriter(
+    () => answerText.value,
+    () => Boolean(props.session?.is_completed),
+);
+
+// The backend completion event can arrive while the local typewriter still has
+// buffered text to reveal. Treat the answer as visually complete only after the
+// displayed text has caught up, so actions never appear beside a moving answer.
+const answerFullyRendered = computed(() =>
+    Boolean(props.session?.is_completed) && typedAnswer.value.length >= answerText.value.length
+);
+
+watch(
+    answerFullyRendered,
+    (ready) => {
+        if (!props.session?.isAgentMode) emit('render-complete-change', ready);
+    },
+    { immediate: true },
+);
+
+// 单次渲染整个 Markdown 内容（替代 token-by-token，修复 KaTeX 公式在 streaming 时闪烁消失的问题）
+const renderedHTML = computed(() => {
+    const text = typedAnswer.value;
+    if (!text || typeof text !== 'string') return '';
+    return renderChatMarkdown(text, {
+        renderer: markdownRenderer,
+        escapeMarkdown: safeMarkdownToHTML,
+        sanitizeHtml: sanitizeMarkdownHTML,
+        streaming: !props.session?.is_completed,
+        knowledgeReferences: props.session?.knowledge_references,
     });
+});
+
+// 计算属性：判断是否有实际内容（非空且不只是空白）
+const hasActualContent = computed(() => {
+    const text = props.content || props.session?.content || '';
+    return text && text.trim().length > 0;
+});
+
+// 获取实际内容
+const getActualContent = () => {
+    return (props.content || props.session?.content || '').trim();
 };
-// 安全地处理 Markdown 内容
-const processMarkdown = (markdownText) => {
-    if (!markdownText || typeof markdownText !== 'string') {
-        return '';
+
+// 复制回答内容
+const handleCopyAnswer = async () => {
+    const content = getActualContent();
+    if (!content) {
+        MessagePlugin.warning(t('chat.emptyContentWarning'));
+        return;
     }
-    
-    // 首先对 Markdown 内容进行安全处理
-    const safeMarkdown = safeMarkdownToHTML(markdownText);
-    
-    // 自定义安全的渲染器处理图片
-    const renderer = {
-        image(href, title, text) {
-            // 验证图片 URL 是否安全
-            if (!isValidImageURL(href)) {
-                return `<p>无效的图片链接</p>`;
-            }
-            // 使用安全的图片创建函数
-            return createSafeImage(href, text || '', title || '');
-        }
-    };
 
-    marked.use({ renderer });
-
-    // 安全地渲染 Markdown
-    let html = marked.parse(safeMarkdown);
-
-    // 使用 DOMPurify 进行最终的安全清理
-    const sanitizedHTML = sanitizeHTML(html);
-    
-    return sanitizedHTML;
+    await copyWithToast(content, 'chat.copySuccess', 'chat.copyFailed');
 };
-const handleImg = async (newVal) => {
-    let index = newVal.lastIndexOf('![');
-    if (index != -1) {
-        isImgLoading.value = true;
-        let str = newVal.slice(index)
-        if (str.includes('](') && str.includes(')')) {
-            processedMarkdown.value = splitMarkdownByImages(newVal)
-            isImgLoading.value = false;
-        } else {
-            processedMarkdown.value = splitMarkdownByImages(newVal.slice(0, index))
+
+// 添加到知识库
+const handleAddToKnowledge = () => {
+    const content = getActualContent();
+    if (!content) {
+        MessagePlugin.warning(t('chat.emptyContentWarning'));
+        return;
+    }
+
+    const question = (props.userQuery || '').trim();
+    const manualContent = buildManualMarkdown(question, content);
+    const manualTitle = formatManualTitle(question);
+    ``
+    uiStore.openManualEditor({
+        mode: 'create',
+        title: manualTitle,
+        content: manualContent,
+        status: 'draft',
+    });
+
+    MessagePlugin.info(t('chat.editorOpened'));
+};
+
+// 处理 markdown-content 中图片的点击事件
+const handleMarkdownImageClick = (e) => {
+    const target = e.target;
+    const artifactIndex = artifactIndexFromEventTarget(target);
+    if (artifactIndex !== null) {
+        e.preventDefault();
+        e.stopPropagation();
+        openArtifactDrawer(artifactIndex);
+        return;
+    }
+    if (target && target.tagName === 'IMG') {
+        const src = target.getAttribute('src');
+        if (src) {
+            e.preventDefault();
+            e.stopPropagation();
+            preview(src);
         }
-    } else {
-        processedMarkdown.value = splitMarkdownByImages(newVal)
     }
-    removeImg()
-}
-function splitMarkdownByImages(markdown) {
-    const imageRegex = /!\[.*?\]\(\s*(?:<([^>]*)>|([^)\s]*))\s*(?:["'].*?["'])?\s*\)/g;
-    const result = [];
-    let lastIndex = 0;
-    let match;
+};
 
-    while ((match = imageRegex.exec(markdown)) !== null) {
-        const textBefore = markdown.slice(lastIndex, match.index);
-        if (textBefore) result.push(textBefore);
-        const url = match[1] || match[2];
-        result.push(url);
-        lastIndex = imageRegex.lastIndex;
-    }
+watch(renderedHTML, () => {
+    nextTick(() => {
+        rebindCitations();
+    });
+});
 
-    const remainingText = markdown.slice(lastIndex);
-    if (remainingText) result.push(remainingText);
-
-    return result;
-}
-function isLink(str) {
-    const trimmedStr = str.trim();
-    // 正则表达式匹配常见链接格式
-    const urlPattern = /^(https?:\/\/|ftp:\/\/|www\.)(?:(?:[\w-]+(?:\.[\w-]+)*)|(?:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})|(?:\[[a-fA-F0-9:]+\]))(?::\d{1,5})?(?:[\/\w.,@?^=%&:~+#-]*[\w@?^=%&\/~+#-])?/i;
-    return urlPattern.test(trimmedStr);
-}
-
-watch(() => props.content, (newVal) => {
-    debounce(handleImg(newVal), 800)
-}, {
-    immediate: true
-})
-
-const myMarkdown = (res) => {
-    return marked.parse(res, { renderer })
-}
+// 渲染 Mermaid 图表的函数
+onUpdated(() => {
+    nextTick(async () => {
+        await hydrateProtectedFileImages(parentMd.value);
+        await hydrateArtifactImages(parentMd.value, artifactRefContext.value);
+        refreshMarkdownEnhancements(parentMd.value);
+        if (props.session?.is_completed) {
+            await renderMermaidInContainer(parentMd.value);
+        }
+    });
+});
 
 onMounted(async () => {
-    processedMarkdown.value = splitMarkdownByImages(props.content);
-    removeImg()
+    // 为 markdown-content 中的图片添加点击事件
+    nextTick(async () => {
+        if (parentMd.value) {
+            parentMd.value.addEventListener('click', handleMarkdownImageClick, true);
+        }
+        rebindCitations();
+        await hydrateProtectedFileImages(parentMd.value);
+        await hydrateArtifactImages(parentMd.value, artifactRefContext.value);
+        await enhanceMarkdownContainer(parentMd.value);
+    });
+});
+
+onBeforeUnmount(() => {
+    if (parentMd.value) {
+        parentMd.value.removeEventListener('click', handleMarkdownImageClick, true);
+    }
 });
 </script>
 <style lang="less" scoped>
-@import '../../../components/css/markdown.less';
+@import '../../../components/css/chat-markdown.less';
+@import '../../../components/css/chat-message-shared.less';
+@import '../../../components/css/chat-citations.less';
 
-:deep(.ai-markdown-template) {
-    contain: content;
-    line-height: 28px;
-    letter-spacing: 1px;
+.bot_msg {
+    &.is-embedded {
+        width: 100%;
 
-    h1,
-    h2,
-    h3,
-    h4 {
-        line-height: 14px;
-        font-size: 16px;
+        :deep(.agent-stream-display) {
+            width: 100%;
+        }
+    }
+}
+
+.rag-answer-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+}
+
+// 内容包装器 - 与 Agent 模式的 answer 样式一致
+.content-wrapper {
+    padding: 2px 0;
+}
+
+.markdown-content {
+    // Chat Markdown visual styles are centralized in chat-markdown.less.
+    // Do not add element-level Markdown rules here; update the shared mixin.
+    .chat-markdown-typography();
+    .chat-citation-pills();
+}
+
+.mentioned_items {
+    .chat-mentioned-items();
+}
+
+.mentioned_tag {
+    .chat-mentioned-tag();
+}
+
+.fallback-icon-btn {
+    color: var(--td-text-color-disabled) !important;
+    border-color: var(--td-component-stroke) !important;
+
+    &:hover {
+        color: var(--td-text-color-placeholder) !important;
+        border-color: var(--td-component-border) !important;
+    }
+}
+
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
     }
 
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 .ai-markdown-img {
+    max-width: 80%;
+    max-height: 300px;
+    width: auto;
+    height: auto;
     border-radius: 8px;
     display: block;
     cursor: pointer;
-    object-fit: scale-down;
-    contain: content;
-    margin-left: 16px;
-    border: 0.5px solid #E7E7E7;
-    max-width: 708px;
-    height: 230px;
+    object-fit: contain;
+    margin: 8px 0 8px 16px;
+    border: 0.5px solid var(--td-component-stroke);
+    transition: transform 0.2s ease;
+
+    &:hover {
+        transform: scale(1.02);
+    }
 }
 
 .bot_msg {
-    background: #fff;
+    // background: var(--td-bg-color-container);
     border-radius: 4px;
-    color: rgba(0, 0, 0, 0.9);
+    color: var(--td-text-color-primary);
     font-size: 16px;
-    padding: 10px 12px;
+    // padding: 10px 12px;
     margin-right: auto;
+    width: 100%;
+    min-width: 0;
     max-width: 100%;
     box-sizing: border-box;
 }
@@ -227,10 +549,10 @@ onMounted(async () => {
 }
 
 .img_loading {
-    background: #3032360f;
+    background: var(--td-bg-color-container-hover);
     height: 230px;
     width: 230px;
-    color: #00000042;
+    color: var(--td-text-color-placeholder);
     display: flex;
     align-items: center;
     justify-content: center;

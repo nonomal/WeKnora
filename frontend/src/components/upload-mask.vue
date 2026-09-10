@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
+const { t } = useI18n()
 </script>
 <template>
     <div class="mask">
         <img class="upload-mask-img" src="@/assets/img/upload-mask.svg" alt="">
-        <span class="drag-txt">将文件拖放到此处</span>
-        <span class="drag-type-txt">pdf、doc 格式文件，不超过30M</span>
-        <span class="drag-type-txt">text、markdown格式文件，不超过30M</span>
+        <span class="drag-txt">{{ $t('file.upload') }}</span>
+        <span class="drag-type-txt">{{ $t('knowledgeBase.pdfDocFormat') }}</span>
+        <span class="drag-type-txt">{{ $t('knowledgeBase.textMarkdownFormat') }}</span>
     </div>
 </template>
 <style scoped lang="less">
@@ -16,8 +18,8 @@
     align-items: center;
 }
 .drag-txt {
-    color: #07c05f;
-    font-family: "PingFang SC";
+    color: var(--td-brand-color);
+    font-family: var(--app-font-family);
     font-size: 24px;
     font-weight: 600;
     line-height: 26px;
@@ -27,9 +29,9 @@
 
 .drag-type-txt {
     width: 217px;
-    color: #00000066;
+    color: var(--td-text-color-disabled);
     text-align: center;
-    font-family: "PingFang SC";
+    font-family: var(--app-font-family);
     font-size: 12px;
     font-weight: 400;
 }

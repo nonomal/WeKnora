@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
+const { t } = useI18n()
 </script>
 <template>
     <div class="empty">
         <img class="empty-img" src="@/assets/img/upload.svg" alt="">
-        <span class="empty-txt">知识为空，拖放上传</span>
-        <span class="empty-type-txt">pdf、doc 格式文件，不超过10M</span>
-        <span class="empty-type-txt">text、markdown格式文件，不超过200K</span>
+        <span class="empty-txt">{{ $t('knowledgeBase.emptyKnowledgeDragDrop') }}</span>
+        <span class="empty-type-txt">{{ $t('knowledgeBase.pdfDocFormat') }}</span>
+        <span class="empty-type-txt">{{ $t('knowledgeBase.textMarkdownFormat') }}</span>
     </div>
 </template>
 <style scoped lang="less">
@@ -18,8 +20,8 @@
 }
 
 .empty-txt {
-    color: #00000099;
-    font-family: "PingFang SC";
+    color: var(--td-text-color-placeholder);
+    font-family: var(--app-font-family);
     font-size: 16px;
     font-weight: 600;
     line-height: 26px;
@@ -27,9 +29,9 @@
 }
 
 .empty-type-txt {
-    color: #00000066;
+    color: var(--td-text-color-disabled);
     text-align: center;
-    font-family: "PingFang SC";
+    font-family: var(--app-font-family);
     font-size: 12px;
     font-weight: 400;
     width: 217px;

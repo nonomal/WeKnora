@@ -2,12 +2,15 @@ package ollama
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/ollama/ollama/api"
@@ -38,8 +41,18 @@ func GetOllamaService() (*OllamaService, error) {
 		return nil, fmt.Errorf("invalid Ollama service URL: %w", err)
 	}
 
-	// Create official client
-	client := api.NewClient(parsedURL, http.DefaultClient)
+	// Dedicated HTTP client for Ollama instead of http.DefaultClient.
+	// - Dial timeout prevents hanging when Ollama process is down or port unreachable
+	// - No overall Timeout so long-running streaming calls are controlled by context cancellation
+	ollamaHTTPClient := &http.Client{
+		Transport: &http.Transport{
+			DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+			TLSHandshakeTimeout: 10 * time.Second,
+			IdleConnTimeout:     90 * time.Second,
+			MaxIdleConns:        10,
+		},
+	}
+	client := api.NewClient(parsedURL, ollamaHTTPClient)
 
 	// Check if Ollama is set as optional
 	isOptional := false
@@ -65,20 +78,19 @@ func (s *OllamaService) StartService(ctx context.Context) error {
 	// Check if service is available
 	err := s.client.Heartbeat(ctx)
 	if err != nil {
-		logger.GetLogger(ctx).Warnf("Ollama service unavailable: %v", err)
+		logger.GetLogger(ctx).Warnf("ollama service unavailable: %v", err)
 		s.isAvailable = false
 
 		// If configured as optional, don't return an error
 		if s.isOptional {
-			logger.GetLogger(ctx).Info("Ollama service set as optional, will continue running the application")
+			logger.GetLogger(ctx).Info("ollama service set as optional, will continue running the application")
 			return nil
 		}
 
-		return fmt.Errorf("Ollama service unavailable: %w", err)
+		return fmt.Errorf("ollama service unavailable: %w", err)
 	}
 
 	s.isAvailable = true
-	logger.GetLogger(ctx).Info("Ollama service ready")
 	return nil
 }
 
@@ -107,9 +119,14 @@ func (s *OllamaService) IsModelAvailable(ctx context.Context, modelName string) 
 		return false, fmt.Errorf("failed to get model list: %w", err)
 	}
 
+	// If no version is specified for the model, add ":latest" by default
+	checkModelName := modelName
+	if !strings.Contains(modelName, ":") {
+		checkModelName = modelName + ":latest"
+	}
 	// Check if model is in the list
 	for _, model := range listResp.Models {
-		if model.Name == modelName {
+		if model.Name == checkModelName {
 			return true, nil
 		}
 	}
@@ -139,8 +156,6 @@ func (s *OllamaService) PullModel(ctx context.Context, modelName string) error {
 		logger.GetLogger(ctx).Infof("Model %s already exists", modelName)
 		return nil
 	}
-
-	logger.GetLogger(ctx).Infof("Pulling model %s...", modelName)
 
 	// Use official client to pull model
 	pullReq := &api.PullRequest{
@@ -182,7 +197,8 @@ func (s *OllamaService) EnsureModelAvailable(ctx context.Context, modelName stri
 	available, err := s.IsModelAvailable(ctx, modelName)
 	if err != nil {
 		if s.isOptional {
-			logger.GetLogger(ctx).Warnf("Failed to check model %s availability, but Ollama is set as optional", modelName)
+			logger.GetLogger(ctx).
+				Warnf("Failed to check model %s availability, but Ollama is set as optional", modelName)
 			return nil
 		}
 		return err
@@ -243,7 +259,15 @@ func (s *OllamaService) GetModelInfo(ctx context.Context, modelName string) (*ap
 	return resp, nil
 }
 
-// ListModels lists all available models
+// OllamaModelInfo represents detailed information about an Ollama model
+type OllamaModelInfo struct {
+	Name       string    `json:"name"`
+	Size       int64     `json:"size"`
+	Digest     string    `json:"digest"`
+	ModifiedAt time.Time `json:"modified_at"`
+}
+
+// ListModels lists all available models with basic info (names only)
 func (s *OllamaService) ListModels(ctx context.Context) ([]string, error) {
 	listResp, err := s.client.List(ctx)
 	if err != nil {
@@ -256,6 +280,31 @@ func (s *OllamaService) ListModels(ctx context.Context) ([]string, error) {
 	}
 
 	return modelNames, nil
+}
+
+// ListModelsDetailed lists all available models with detailed information
+func (s *OllamaService) ListModelsDetailed(ctx context.Context) ([]OllamaModelInfo, error) {
+	listResp, err := s.client.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get model list: %w", err)
+	}
+	jsonData, err := json.Marshal(listResp.Models)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal model list: %w", err)
+	}
+	logger.GetLogger(ctx).Infof("List models detailed: %s", string(jsonData))
+
+	models := make([]OllamaModelInfo, len(listResp.Models))
+	for i, model := range listResp.Models {
+		models[i] = OllamaModelInfo{
+			Name:       model.Name,
+			Size:       model.Size,
+			Digest:     model.Digest,
+			ModifiedAt: model.ModifiedAt,
+		}
+	}
+
+	return models, nil
 }
 
 // DeleteModel deletes a model

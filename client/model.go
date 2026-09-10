@@ -7,13 +7,69 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 )
 
-// ModelType model type
+// ModelType represents the type of AI model
 type ModelType string
 
-// ModelSource model source
+const (
+	ModelTypeEmbedding   ModelType = "Embedding"   // Embedding model
+	ModelTypeRerank      ModelType = "Rerank"      // Rerank model
+	ModelTypeKnowledgeQA ModelType = "KnowledgeQA" // KnowledgeQA model
+	ModelTypeVLLM        ModelType = "VLLM"        // VLLM model
+	ModelTypeASR         ModelType = "ASR"         // ASR (Automatic Speech Recognition) model
+)
+
+// AllModelTypes returns every model type the server recognises, in a stable
+// order. Callers (CLI flag validation, docs) should use this instead of
+// re-typing the string set, so they can't drift from the SDK.
+func AllModelTypes() []ModelType {
+	return []ModelType{
+		ModelTypeEmbedding, ModelTypeRerank, ModelTypeKnowledgeQA, ModelTypeVLLM, ModelTypeASR,
+	}
+}
+
+// ModelSource represents the source of the model
 type ModelSource string
+
+const (
+	ModelSourceLocal       ModelSource = "local"        // Local model
+	ModelSourceRemote      ModelSource = "remote"       // Remote model
+	ModelSourceAliyun      ModelSource = "aliyun"       // Aliyun DashScope model
+	ModelSourceZhipu       ModelSource = "zhipu"        // Zhipu model
+	ModelSourceVolcengine  ModelSource = "volcengine"   // Volcengine model
+	ModelSourceDeepseek    ModelSource = "deepseek"     // Deepseek model
+	ModelSourceHunyuan     ModelSource = "hunyuan"      // Hunyuan model
+	ModelSourceMinimax     ModelSource = "minimax"      // Minimax mode
+	ModelSourceOpenAI      ModelSource = "openai"       // OpenAI model
+	ModelSourceGemini      ModelSource = "gemini"       // Gemini model
+	ModelSourceMimo        ModelSource = "mimo"         // Mimo model
+	ModelSourceSiliconFlow ModelSource = "siliconflow"  // SiliconFlow model
+	ModelSourceJina        ModelSource = "jina"         // Jina AI model
+	ModelSourceOpenRouter  ModelSource = "openrouter"   // OpenRouter model
+	ModelSourceLiteLLM     ModelSource = "litellm"      // LiteLLM proxy model
+	ModelSourceRequesty    ModelSource = "requesty"     // Requesty model
+	ModelSourceNvidia      ModelSource = "nvidia"       // NVIDIA model
+	ModelSourceNovita      ModelSource = "novita"       // Novita AI model
+	ModelSourceAzureOpenAI ModelSource = "azure_openai" // Azure OpenAI model
+)
+
+// AllModelSources returns every model source the server recognises, in a stable
+// order. This is the broad set used for FILTERING existing records (model
+// list --source); creating a model only supports local/remote (the provider
+// identity goes in ModelParameters.provider). Use this instead of re-typing
+// the set so callers can't drift from the SDK.
+func AllModelSources() []ModelSource {
+	return []ModelSource{
+		ModelSourceLocal, ModelSourceRemote, ModelSourceAliyun, ModelSourceZhipu,
+		ModelSourceVolcengine, ModelSourceDeepseek, ModelSourceHunyuan, ModelSourceMinimax,
+		ModelSourceOpenAI, ModelSourceGemini, ModelSourceMimo, ModelSourceSiliconFlow,
+		ModelSourceJina, ModelSourceOpenRouter, ModelSourceLiteLLM, ModelSourceRequesty,
+		ModelSourceNvidia, ModelSourceNovita,
+		ModelSourceAzureOpenAI,
+	}
+}
 
 // ModelParameters model parameters
 type ModelParameters map[string]interface{}
@@ -23,6 +79,7 @@ type Model struct {
 	ID          string          `json:"id"`
 	TenantID    uint            `json:"tenant_id"`
 	Name        string          `json:"name"`
+	DisplayName string          `json:"display_name"`
 	Type        ModelType       `json:"type"`
 	Source      ModelSource     `json:"source"`
 	Description string          `json:"description"`
@@ -35,6 +92,7 @@ type Model struct {
 // CreateModelRequest model creation request
 type CreateModelRequest struct {
 	Name        string          `json:"name"`
+	DisplayName string          `json:"display_name"`
 	Type        ModelType       `json:"type"`
 	Source      ModelSource     `json:"source"`
 	Description string          `json:"description"`
@@ -45,6 +103,7 @@ type CreateModelRequest struct {
 // UpdateModelRequest model update request
 type UpdateModelRequest struct {
 	Name        string          `json:"name"`
+	DisplayName string          `json:"display_name"`
 	Description string          `json:"description"`
 	Parameters  ModelParameters `json:"parameters"`
 	IsDefault   bool            `json:"is_default"`
@@ -61,20 +120,6 @@ type ModelListResponse struct {
 	Success bool    `json:"success"`
 	Data    []Model `json:"data"`
 }
-
-// Model type constants
-const (
-	ModelTypeEmbedding ModelType = "embedding"
-	ModelTypeChat      ModelType = "chat"
-	ModelTypeRerank    ModelType = "rerank"
-	ModelTypeSummary   ModelType = "summary"
-)
-
-// Model source constants
-const (
-	ModelSourceInternal ModelSource = "internal"
-	ModelSourceExternal ModelSource = "external"
-)
 
 // CreateModel creates a model
 func (c *Client) CreateModel(ctx context.Context, request *CreateModelRequest) (*Model, error) {
@@ -152,4 +197,41 @@ func (c *Client) DeleteModel(ctx context.Context, modelID string) error {
 	}
 
 	return parseResponse(resp, &response)
+}
+
+// ModelProvider represents a model provider with its supported types and default URLs
+type ModelProvider struct {
+	Value       string            `json:"value"`
+	Label       string            `json:"label"`
+	Description string            `json:"description"`
+	DefaultURLs map[string]string `json:"defaultUrls"`
+	ModelTypes  []string          `json:"modelTypes"`
+}
+
+// ModelProviderListResponse represents the API response for listing model providers
+type ModelProviderListResponse struct {
+	Success bool            `json:"success"`
+	Data    []ModelProvider `json:"data"`
+}
+
+// ListModelProviders retrieves the list of supported model providers.
+// modelType is optional and can be used to filter by type: "chat", "embedding", "rerank", "vllm".
+func (c *Client) ListModelProviders(ctx context.Context, modelType string) ([]ModelProvider, error) {
+	var queryParams url.Values
+	if modelType != "" {
+		queryParams = url.Values{}
+		queryParams.Add("model_type", modelType)
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/api/v1/models/providers", nil, queryParams)
+	if err != nil {
+		return nil, err
+	}
+
+	var response ModelProviderListResponse
+	if err := parseResponse(resp, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Data, nil
 }

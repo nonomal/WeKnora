@@ -6,15 +6,17 @@ import {
   uploadKnowledgeFile,
   listKnowledgeFiles,
   getKnowledgeDetails,
-  delKnowledgeDetails,
   getKnowledgeDetailsCon,
 } from "@/api/knowledge-base/index";
 import { knowledgeStore } from "@/stores/knowledge";
+import { useUIStore } from "@/stores/ui";
 import { useRoute } from 'vue-router';
+import { useI18n } from 'vue-i18n';
 
-const usemenuStore = knowledgeStore();
 export default function (knowledgeBaseId?: string) {
+  const usemenuStore = knowledgeStore();
   const route = useRoute();
+  const { t } = useI18n();
   const { cardList, total } = storeToRefs(usemenuStore);
   let moreIndex = ref(-1);
   const details = reactive({
@@ -22,22 +24,67 @@ export default function (knowledgeBaseId?: string) {
     time: "",
     md: [] as any[],
     id: "",
-    total: 0
+    total: 0,
+    type: "",
+    source: "",
+    channel: "",
+    file_type: "",
+    description: "",
+    summary_status: "",
+    parse_status: "",
+    error_message: "",
+	custom_metadata: {} as Record<string, unknown>,
+    chunkLoading: false,
+    chunkLoadError: "",
+    tags: [] as Array<{ id: string; name: string; color?: string }>,
   });
-  const getKnowled = (query = { page: 1, page_size: 35 }, kbId?: string) => {
+  let knowledgeListGeneration = 0;
+  let chunkRequestGeneration = 0;
+  let activeKnowledgeId = '';
+  const getKnowled = (
+    query: {
+      page: number;
+      page_size: number;
+      tag_ids?: string;
+      keyword?: string;
+      file_type?: string;
+      parse_status?: string;
+      source?: string;
+      start_time?: string;
+      end_time?: string;
+      folder_path?: string;
+      folder_recursive?: boolean;
+    } = { page: 1, page_size: 35 },
+    kbId?: string,
+  ): Promise<void> => {
     const targetKbId = kbId || knowledgeBaseId;
-    if (!targetKbId) return;
-    
-    listKnowledgeFiles(targetKbId, query)
+    if (!targetKbId) return Promise.resolve();
+    const requestGeneration = query.page === 1 ? ++knowledgeListGeneration : knowledgeListGeneration;
+
+    return listKnowledgeFiles(targetKbId, query)
       .then((result: any) => {
+        if (requestGeneration !== knowledgeListGeneration) return;
+
+        const currentRouteKbId = (route.params as any)?.kbId as string | undefined;
+        if (currentRouteKbId && currentRouteKbId !== targetKbId) return;
+
         const { data, total: totalResult } = result;
-        const cardList_ = data.map((item: any) => ({
-          ...item,
-          file_name: item.file_name.substring(0, item.file_name.lastIndexOf(".")),
-          updated_at: formatStringDate(new Date(item.updated_at)),
-          isMore: false,
-          file_type: item.file_type.toLocaleUpperCase(),
-        }));
+    const cardList_ = data.map((item: any) => {
+      const rawName = item.file_name || item.title || item.source || t('knowledgeBase.untitledDocument')
+      const dotIndex = rawName.lastIndexOf('.')
+      const displayName = dotIndex > 0 ? rawName.substring(0, dotIndex) : rawName
+      const fileTypeSource = item.file_type || (item.type === 'manual' ? 'MANUAL' : '')
+      return {
+        ...item,
+        original_file_name: item.file_name,
+        display_name: displayName,
+        file_name: displayName,
+        folder_path: item.folder_path || '',
+        updated_at: formatStringDate(new Date(item.updated_at)),
+        isMore: false,
+        file_type: fileTypeSource ? String(fileTypeSource).toLocaleUpperCase() : '',
+      }
+    });
         
         if (query.page === 1) {
           cardList.value = cardList_;
@@ -47,22 +94,6 @@ export default function (knowledgeBaseId?: string) {
         total.value = totalResult;
       })
       .catch(() => {});
-  };
-  const delKnowledge = (index: number, item: any) => {
-    cardList.value[index].isMore = false;
-    moreIndex.value = -1;
-    delKnowledgeDetails(item.id)
-      .then((result: any) => {
-        if (result.success) {
-          MessagePlugin.info("知识删除成功！");
-          getKnowled();
-        } else {
-          MessagePlugin.error("知识删除失败！");
-        }
-      })
-      .catch(() => {
-        MessagePlugin.error("知识删除失败！");
-      });
   };
   const openMore = (index: number) => {
     moreIndex.value = index;
@@ -74,7 +105,7 @@ export default function (knowledgeBaseId?: string) {
   };
   const requestMethod = (file: any, uploadInput: any) => {
     if (!(file instanceof File) || !uploadInput) {
-      MessagePlugin.error("文件类型错误！");
+      MessagePlugin.error(t('error.invalidFileType'));
       return;
     }
     
@@ -92,42 +123,69 @@ export default function (knowledgeBaseId?: string) {
       currentKbId = knowledgeBaseId;
     }
     if (!currentKbId) {
-      MessagePlugin.error("缺少知识库ID");
+      MessagePlugin.error(t('error.missingKbId'));
       return;
     }
     
-    uploadKnowledgeFile(currentKbId, { file })
+    // 获取当前选中的标签 ID
+    const uiStore = useUIStore();
+    const tagIdsToUpload = uiStore.selectedTagIds.length > 0 ? [...uiStore.selectedTagIds] : undefined;
+
+    uploadKnowledgeFile(currentKbId, { file, tag_ids: tagIdsToUpload })
       .then((result: any) => {
         if (result.success) {
-          MessagePlugin.info("上传成功！");
+          MessagePlugin.info(t('knowledgeBase.uploadSuccess'));
           getKnowled({ page: 1, page_size: 35 }, currentKbId);
         } else {
-          const errorMessage = result.error?.message || result.message || "上传失败！";
-          MessagePlugin.error(result.code === 'duplicate_file' ? "文件已存在" : errorMessage);
+          const errorMessage = result.error?.message || result.message || t('knowledgeBase.uploadFailed');
+          MessagePlugin.error(result.code === 'duplicate_file' ? t('knowledgeBase.fileExists') : errorMessage);
         }
         uploadInput.value.value = "";
       })
       .catch((err: any) => {
-        const errorMessage = err.error?.message || err.message || "上传失败！";
-        MessagePlugin.error(err.code === 'duplicate_file' ? "文件已存在" : errorMessage);
+        const errorMessage = err.error?.message || err.message || t('knowledgeBase.uploadFailed');
+        MessagePlugin.error(err.code === 'duplicate_file' ? t('knowledgeBase.fileExists') : errorMessage);
         uploadInput.value.value = "";
       });
   };
   const getCardDetails = (item: any) => {
+    activeKnowledgeId = item.id;
+    chunkRequestGeneration++;
     Object.assign(details, {
       title: "",
       time: "",
       md: [],
       id: "",
+      type: "",
+      source: "",
+      channel: "",
+      file_type: "",
+      description: "",
+      summary_status: "",
+      parse_status: "",
+      error_message: "",
+	  custom_metadata: {},
+      chunkLoadError: "",
+      tags: item?.tags ? [...item.tags] : [],
     });
     getKnowledgeDetails(item.id)
       .then((result: any) => {
         if (result.success && result.data) {
           const { data } = result;
           Object.assign(details, {
-            title: data.file_name,
+            title: data.file_name || data.title || data.source || t('knowledgeBase.untitledDocument'),
             time: formatStringDate(new Date(data.updated_at)),
             id: data.id,
+            type: data.type || 'file',
+            source: data.source || '',
+            channel: data.channel || '',
+            file_type: data.file_type || '',
+            description: data.description || '',
+            summary_status: data.summary_status || '',
+            parse_status: data.parse_status || '',
+            error_message: data.error_message || '',
+			custom_metadata: data.custom_metadata || {},
+            tags: data.tags?.length ? data.tags : (item?.tags || []),
           });
         }
       })
@@ -136,26 +194,40 @@ export default function (knowledgeBaseId?: string) {
   };
   
   const getfDetails = (id: string, page: number) => {
+    const requestGeneration = ++chunkRequestGeneration;
+    details.chunkLoading = true;
+    details.chunkLoadError = "";
     getKnowledgeDetailsCon(id, page)
       .then((result: any) => {
+        if (requestGeneration !== chunkRequestGeneration || activeKnowledgeId !== id) return;
         if (result.success && result.data) {
           const { data, total: totalResult } = result;
-          if (page === 1) {
-            details.md = data;
-          } else {
-            details.md.push(...data);
-          }
+          details.md = data;
           details.total = totalResult;
+        } else {
+          details.chunkLoadError = result?.message || result?.error?.message || t('knowledgeBase.chunkLoadFailed');
         }
       })
-      .catch(() => {});
+      .catch((err: any) => {
+        if (requestGeneration !== chunkRequestGeneration || activeKnowledgeId !== id) return;
+        details.chunkLoadError = err?.message || t('knowledgeBase.chunkLoadFailed');
+        console.error("[ChunkLoad] failed", {
+          knowledgeId: id,
+          page,
+          error: err,
+        });
+      })
+      .finally(() => {
+        if (requestGeneration === chunkRequestGeneration) {
+          details.chunkLoading = false;
+        }
+      });
   };
   return {
     cardList,
     moreIndex,
     getKnowled,
     details,
-    delKnowledge,
     openMore,
     onVisibleChange,
     requestMethod,
